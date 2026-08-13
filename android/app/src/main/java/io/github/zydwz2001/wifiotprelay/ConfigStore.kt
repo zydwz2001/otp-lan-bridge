@@ -1,4 +1,4 @@
-package dev.otplanbridge
+package io.github.zydwz2001.wifiotprelay
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -16,7 +16,7 @@ data class PairingRecord(val deviceId: String, val clientId: String, val key: By
 
 @SuppressLint("ApplySharedPref") // Pairing changes must be durable before a success response is sent.
 class ConfigStore(context: Context) {
-    private val preferences = context.getSharedPreferences("bridge_config", Context.MODE_PRIVATE)
+    private val preferences = context.getSharedPreferences("wifi_relay_config", Context.MODE_PRIVATE)
 
     var port: Int
         get() = preferences.getInt(KEY_PORT, DEFAULT_PORT)
@@ -103,8 +103,8 @@ class ConfigStore(context: Context) {
     private fun String.decodeBase64(): ByteArray = Base64.decode(this, Base64.NO_WRAP)
 
     companion object {
-        const val DEFAULT_PORT = 41837
-        private const val KEYSTORE_ALIAS = "otp_lan_bridge_pairing_master_v1"
+        const val DEFAULT_PORT = 42871
+        private const val KEYSTORE_ALIAS = "wifi_otp_relay_pairing_master_v1"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val KEY_PORT = "port"
         private const val KEY_SMS_PACKAGE = "sms_package"

@@ -1,4 +1,4 @@
-package dev.otplanbridge
+package io.github.zydwz2001.wifiotprelay
 
 import kotlin.math.max
 import kotlin.math.min

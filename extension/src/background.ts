@@ -22,12 +22,20 @@ import {
   type PanelState
 } from "./types";
 
-const CONFIG_KEY = "config";
-const STATE_KEY = "runtimeState";
-const EXPIRY_ALARM = "bridge-state-expiry";
+const CONFIG_KEY = "wifiRelayConfigV2";
+const STATE_KEY = "wifiRelayRuntimeV2";
+const EXPIRY_ALARM = "wifi-relay-state-expiry";
 const ARM_TTL_MS = 5 * 60 * 1000;
 const CODE_TTL_MS = 2 * 60 * 1000;
 const CLOCK_TOLERANCE_MS = 2 * 60 * 1000;
+const LOCAL_NETWORK_PROBE_TTL_MS = 45 * 1000;
+
+interface LocalNetworkProbePermit {
+  host: string;
+  port: number;
+  tabId: number;
+  expiresAt: number;
+}
 
 let config: ExtensionConfig = { ...DEFAULT_CONFIG };
 let state: BridgeRuntimeState = { ...DEFAULT_RUNTIME_STATE };
@@ -43,6 +51,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let sendQueue: Promise<void> = Promise.resolve();
 const focusedTargets = new Map<number, FocusTarget>();
+const localNetworkProbePermits = new Map<string, LocalNetworkProbePermit>();
 let initialization: Promise<void> | null = null;
 
 void ensureInitialized();
@@ -57,6 +66,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   focusedTargets.delete(tabId);
+  for (const [token, permit] of localNetworkProbePermits) {
+    if (permit.tabId === tabId) localNetworkProbePermits.delete(token);
+  }
   if (state.armedTabId === tabId) void cancelWait("标签页已关闭");
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -222,6 +234,54 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
     }
     case "GET_OPTIONS":
       return { config: publicConfig(), state: panelStateForTab(-1) };
+    case "INLINE_SAVE_PHONE": {
+      const phoneNumber = String(message.phoneNumber ?? "").replace(/[\s-]/g, "");
+      if (phoneNumber && !/^\+?\d{6,15}$/.test(phoneNumber)) throw new Error("手机号格式无效");
+      config.phoneNumber = phoneNumber;
+      await saveConfig();
+      await broadcastState();
+      return { config: publicConfig() };
+    }
+    case "INLINE_SAVE_ADDRESS": {
+      const host = String(message.host ?? "").trim();
+      const port = Number(message.port);
+      validateHostAndPort(host, port);
+      const addressChanged = host !== config.host || port !== config.port;
+      config.host = host;
+      config.port = port;
+      await saveConfig();
+      if (addressChanged && config.pairingKey) connectBridge();
+      await broadcastState();
+      return { config: publicConfig() };
+    }
+    case "AUTHORIZE_LOCAL_NETWORK_PROBE": {
+      const tabId = requireTab(sender);
+      if (sender.frameId !== 0) throw new Error("只允许从验证码传递主面板请求本地网络权限");
+      const token = String(message.token ?? "");
+      const host = String(message.host ?? "").trim();
+      const port = Number(message.port);
+      if (!/^[0-9a-f-]{36}$/i.test(token)) throw new Error("本地网络授权票据无效");
+      validateHostAndPort(host, port);
+      pruneLocalNetworkProbePermits();
+      localNetworkProbePermits.set(token, { host, port, tabId, expiresAt: Date.now() + LOCAL_NETWORK_PROBE_TTL_MS });
+      return {};
+    }
+    case "CLAIM_LOCAL_NETWORK_PROBE": {
+      const senderUrl = sender.url?.replace(/[?#].*$/, "");
+      if (sender.id !== chrome.runtime.id || senderUrl !== chrome.runtime.getURL("pair-permission.html")) {
+        throw new Error("本地网络权限页来源无效");
+      }
+      const token = String(message.token ?? "");
+      const permit = localNetworkProbePermits.get(token);
+      localNetworkProbePermits.delete(token);
+      if (!permit || permit.expiresAt < Date.now() || sender.tab?.id !== permit.tabId) {
+        throw new Error("本地网络授权已失效，请重新点击配对");
+      }
+      if (String(message.host ?? "").trim() !== permit.host || Number(message.port) !== permit.port) {
+        throw new Error("本地网络授权地址不匹配");
+      }
+      return {};
+    }
     case "SAVE_OPTIONS": {
       const incoming = message.config as Partial<ExtensionConfig> | undefined;
       if (!incoming) throw new Error("设置内容无效");
@@ -279,6 +339,8 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
     }
     case "UNPAIR": {
       disconnectBridge(true);
+      config.host = "";
+      config.port = 0;
       config.deviceId = undefined;
       config.pairingKey = undefined;
       await saveConfig();
@@ -383,7 +445,7 @@ function connectBridge(): void {
     });
   };
   socket.onerror = () => { /* onclose owns retry and user-facing state */ };
-  socket.onclose = () => handleDisconnect(generation, "手机未连接，请检查同一 Wi-Fi 和手机桥接状态");
+  socket.onclose = () => handleDisconnect(generation, "手机未连接，请检查手机端是否已经开始传递");
 }
 
 function disconnectBridge(incrementGeneration = true): void {
@@ -674,20 +736,24 @@ function requireTab(sender: chrome.runtime.MessageSender): number {
   return tabId;
 }
 
+function pruneLocalNetworkProbePermits(): void {
+  const now = Date.now();
+  for (const [token, permit] of localNetworkProbePermits) {
+    if (permit.expiresAt < now) localNetworkProbePermits.delete(token);
+  }
+}
+
 function validateHostAndPort(host: string, port: number): void {
-  if (!isPrivateIpv4(host)) throw new Error("手机地址必须是局域网、Tailscale IPv4 或 USB 地址 127.0.0.1");
+  if (!isPrivateWifiIpv4(host)) throw new Error("请输入 App 显示的 Wi-Fi 地址，例如 192.168.1.23");
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("端口必须在 1024–65535 之间");
 }
 
-function isPrivateIpv4(host: string): boolean {
+function isPrivateWifiIpv4(host: string): boolean {
   const parts = host.split(".").map(Number);
   if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
   return parts[0] === 10 ||
-    parts[0] === 127 ||
-    (parts[0] === 100 && parts[1]! >= 64 && parts[1]! <= 127) ||
     (parts[0] === 172 && parts[1]! >= 16 && parts[1]! <= 31) ||
-    (parts[0] === 192 && parts[1] === 168) ||
-    (parts[0] === 169 && parts[1] === 254);
+    (parts[0] === 192 && parts[1] === 168);
 }
 
 function bridgeUrl(host: string, port: number): string {

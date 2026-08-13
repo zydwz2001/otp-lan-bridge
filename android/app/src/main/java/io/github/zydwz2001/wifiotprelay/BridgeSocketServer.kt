@@ -1,4 +1,4 @@
-package dev.otplanbridge
+package io.github.zydwz2001.wifiotprelay
 
 import org.java_websocket.WebSocket
 import org.java_websocket.handshake.ClientHandshake
@@ -64,7 +64,7 @@ class BridgeSocketServer(
 
     override fun onStart() {
         scheduler.scheduleWithFixedDelay(::heartbeatTick, 5, 5, TimeUnit.SECONDS)
-        onStateChanged("局域网服务已启动")
+        onStateChanged("验证码传递已开始")
     }
 
     override fun onOpen(connection: WebSocket, handshake: ClientHandshake) {
@@ -114,7 +114,7 @@ class BridgeSocketServer(
     }
 
     override fun onError(connection: WebSocket?, exception: Exception) {
-        onStateChanged(if (connection == null) "局域网服务启动失败" else "浏览器连接异常")
+        onStateChanged(if (connection == null) "验证码传递启动失败" else "浏览器连接异常")
     }
 
     fun stopSafely() {
@@ -494,6 +494,5 @@ class BridgeSocketServer(
 }
 
 internal fun isAllowedBridgePeer(address: InetAddress): Boolean {
-    if (address.isLoopbackAddress || address.isSiteLocalAddress || address.isLinkLocalAddress) return true
-    return isTailscaleAddress(address)
+    return address.isSiteLocalAddress && !address.isLoopbackAddress && !address.isLinkLocalAddress
 }

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fillTarget } from "../src/fill";
+import { fillTarget, findOtpTarget, submitOtpForm } from "../src/fill";
 
 function visible<T extends HTMLElement>(element: T): T {
   Object.defineProperty(element, "getClientRects", { configurable: true, value: () => ({ length: 1 }) as DOMRectList });
@@ -72,5 +72,37 @@ describe("fillTarget", () => {
     expect(Object.getOwnPropertyDescriptor(input, "value")?.value).toBe("stale");
     Reflect.deleteProperty(input, "value");
     expect(input.value).toBe("7254");
+  });
+
+  it("finds the OTP input without requiring a second user click", () => {
+    const phone = visible(document.createElement("input"));
+    phone.type = "tel";
+    const otp = visible(document.createElement("input"));
+    otp.autocomplete = "one-time-code";
+    otp.maxLength = 6;
+    document.body.append(phone, otp);
+    expect(findOtpTarget(document, phone, "483921")).toBe(otp);
+  });
+
+  it("submits only the clear login action in the OTP form", () => {
+    const form = document.createElement("form");
+    const otp = visible(document.createElement("input"));
+    otp.autocomplete = "one-time-code";
+    const resend = visible(document.createElement("button"));
+    resend.type = "button";
+    resend.textContent = "重新发送验证码";
+    const login = visible(document.createElement("button"));
+    login.type = "submit";
+    login.textContent = "登录";
+    form.addEventListener("submit", (event) => event.preventDefault());
+    form.append(otp, resend, login);
+    document.body.append(form);
+    const loginClick = vi.fn();
+    const resendClick = vi.fn();
+    login.addEventListener("click", loginClick);
+    resend.addEventListener("click", resendClick);
+    expect(submitOtpForm(otp)).toBe(true);
+    expect(loginClick).toHaveBeenCalledOnce();
+    expect(resendClick).not.toHaveBeenCalled();
   });
 });

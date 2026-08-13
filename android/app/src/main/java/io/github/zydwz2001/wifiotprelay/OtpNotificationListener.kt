@@ -1,4 +1,4 @@
-package dev.otplanbridge
+package io.github.zydwz2001.wifiotprelay
 
 import android.app.Notification
 import android.content.ComponentName

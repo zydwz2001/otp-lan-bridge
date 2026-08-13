@@ -63,7 +63,7 @@ export async function derivePairingKey(
     []
   );
   const shared = await crypto.subtle.deriveBits({ name: "ECDH", public: publicKey }, privateKey, 256);
-  return hkdf(shared, await sha256(pairCode), "otp-lan-bridge/pairing/v1");
+  return hkdf(shared, await sha256(pairCode), "wifi-otp-relay/pairing/v1");
 }
 
 export async function deriveSessionKey(
@@ -77,7 +77,7 @@ export async function deriveSessionKey(
   const salt = new Uint8Array(client.length + server.length);
   salt.set(client);
   salt.set(server, client.length);
-  return hkdf(pairingKey, salt, `otp-lan-bridge/session/v1|${sessionId}`);
+  return hkdf(pairingKey, salt, `wifi-otp-relay/session/v1|${sessionId}`);
 }
 
 export async function verifyHmac(key: Uint8Array, value: string, expectedBase64: string): Promise<boolean> {
