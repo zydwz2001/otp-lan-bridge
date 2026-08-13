@@ -34,6 +34,9 @@ interface LocalNetworkProbePermit {
   host: string;
   port: number;
   tabId: number;
+  permissionWindowId?: number;
+  permissionTabId?: number;
+  claimed?: boolean;
   expiresAt: number;
 }
 
@@ -73,6 +76,13 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading") focusedTargets.delete(tabId);
+});
+chrome.windows.onRemoved.addListener((windowId) => {
+  for (const [token, permit] of localNetworkProbePermits) {
+    if (permit.permissionWindowId !== windowId) continue;
+    localNetworkProbePermits.delete(token);
+    void sendLocalNetworkProbeResult(permit.tabId, token, false, "授权窗口已关闭，请重新点击配对");
+  }
 });
 
 chrome.runtime.onMessage.addListener((message: Record<string, unknown>, sender, sendResponse) => {
@@ -263,7 +273,21 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       if (!/^[0-9a-f-]{36}$/i.test(token)) throw new Error("本地网络授权票据无效");
       validateHostAndPort(host, port);
       pruneLocalNetworkProbePermits();
-      localNetworkProbePermits.set(token, { host, port, tabId, expiresAt: Date.now() + LOCAL_NETWORK_PROBE_TTL_MS });
+      const permit: LocalNetworkProbePermit = { host, port, tabId, expiresAt: Date.now() + LOCAL_NETWORK_PROBE_TTL_MS };
+      localNetworkProbePermits.set(token, permit);
+      const permissionWindow = await chrome.windows.create({
+        url: chrome.runtime.getURL(`pair-permission.html#${encodeURIComponent(token)}`),
+        type: "popup",
+        width: 420,
+        height: 310,
+        focused: true
+      });
+      if (permissionWindow.id === undefined || permissionWindow.tabs?.[0]?.id === undefined) {
+        localNetworkProbePermits.delete(token);
+        throw new Error("无法打开浏览器授权窗口");
+      }
+      permit.permissionWindowId = permissionWindow.id;
+      permit.permissionTabId = permissionWindow.tabs[0].id;
       return {};
     }
     case "CLAIM_LOCAL_NETWORK_PROBE": {
@@ -273,12 +297,28 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       }
       const token = String(message.token ?? "");
       const permit = localNetworkProbePermits.get(token);
-      localNetworkProbePermits.delete(token);
-      if (!permit || permit.expiresAt < Date.now() || sender.tab?.id !== permit.tabId) {
+      if (!permit || permit.expiresAt < Date.now() || sender.tab?.id !== permit.permissionTabId || permit.claimed) {
         throw new Error("本地网络授权已失效，请重新点击配对");
       }
-      if (String(message.host ?? "").trim() !== permit.host || Number(message.port) !== permit.port) {
-        throw new Error("本地网络授权地址不匹配");
+      permit.claimed = true;
+      return { host: permit.host, port: permit.port };
+    }
+    case "LOCAL_NETWORK_PROBE_RESULT": {
+      const senderUrl = sender.url?.replace(/[?#].*$/, "");
+      if (sender.id !== chrome.runtime.id || senderUrl !== chrome.runtime.getURL("pair-permission.html")) {
+        throw new Error("本地网络权限页来源无效");
+      }
+      const token = String(message.token ?? "");
+      const permit = localNetworkProbePermits.get(token);
+      if (!permit || !permit.claimed || sender.tab?.id !== permit.permissionTabId) {
+        throw new Error("本地网络授权结果无效");
+      }
+      localNetworkProbePermits.delete(token);
+      const ok = message.probeOk === true;
+      const error = ok ? undefined : String(message.probeError ?? "浏览器未允许访问手机");
+      await sendLocalNetworkProbeResult(permit.tabId, token, ok, error);
+      if (ok && permit.permissionWindowId !== undefined) {
+        try { await chrome.windows.remove(permit.permissionWindowId); } catch { /* window already closed */ }
       }
       return {};
     }
@@ -365,7 +405,7 @@ async function pairDevice(host: string, port: number, pairCode: string): Promise
     const pairSocket = new WebSocket(url);
     const timeout = setTimeout(() => {
       pairSocket.close();
-      reject(new Error("配对超时，请确认手机与电脑处于同一 Wi-Fi"));
+      reject(new Error("手机服务未响应，请在 App 中先停止传递，再重新开始传递后重试"));
     }, 12_000);
     pairSocket.onopen = () => {
       pairSocket.send(JSON.stringify({ v: 1, type: "PAIR_INIT", clientId: config.clientId, pairCode, clientPublicKey }));
@@ -741,6 +781,17 @@ function pruneLocalNetworkProbePermits(): void {
   for (const [token, permit] of localNetworkProbePermits) {
     if (permit.expiresAt < now) localNetworkProbePermits.delete(token);
   }
+}
+
+async function sendLocalNetworkProbeResult(tabId: number, token: string, ok: boolean, error?: string): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      type: "LOCAL_NETWORK_PROBE_RESULT",
+      token,
+      probeOk: ok,
+      probeError: error
+    }, { frameId: 0 });
+  } catch { /* requesting page was closed */ }
 }
 
 function validateHostAndPort(host: string, port: number): void {

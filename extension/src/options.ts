@@ -170,7 +170,7 @@ async function pairFromVisiblePage(host: string, port: number, pairCode: string)
     const socket = new WebSocket(`ws://${host}:${port}/v1/bridge`);
     const timeout = window.setTimeout(() => {
       socket.close();
-      reject(new Error("配对超时：请确认两台设备在同一个 Wi-Fi，并允许 Chrome 访问本地网络"));
+      reject(new Error("手机服务未响应：请在 App 中先停止传递，再重新开始传递后重试"));
     }, 12_000);
     socket.onopen = () => socket.send(JSON.stringify({
       v: 1,

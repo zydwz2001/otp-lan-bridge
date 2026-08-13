@@ -1,54 +1,56 @@
 export {};
 
-interface ProbeRequest {
-  type: "OTP_LOCAL_NETWORK_PROBE";
-  token: string;
-  host: string;
-  port: number;
-}
+const statusElement = document.getElementById("status");
+const continueButton = document.getElementById("continue") as HTMLButtonElement | null;
+const token = decodeURIComponent(location.hash.slice(1));
+continueButton?.addEventListener("click", () => {
+  continueButton.disabled = true;
+  continueButton.textContent = "正在连接…";
+  void requestPermission();
+}, { once: true });
 
-const status = document.getElementById("status");
-let activeSocket: WebSocket | null = null;
-
-window.addEventListener("message", async (event: MessageEvent<Partial<ProbeRequest>>) => {
-  if (event.source !== window.parent || event.data?.type !== "OTP_LOCAL_NETWORK_PROBE") return;
-  const token = String(event.data.token ?? "");
-  const host = String(event.data.host ?? "").trim();
-  const port = Number(event.data.port);
-  if (!token || !isPrivateIpv4(host) || !Number.isInteger(port) || port < 1024 || port > 65535) {
-    respond(token, false, "手机地址或端口无效");
-    return;
-  }
-
-  const claim = await chrome.runtime.sendMessage({ type: "CLAIM_LOCAL_NETWORK_PROBE", token, host, port }) as Record<string, unknown> | undefined;
+async function requestPermission(): Promise<void> {
+  if (!token) return finish(false, "授权请求无效，请关闭窗口后重新配对");
+  const claim = await chrome.runtime.sendMessage({ type: "CLAIM_LOCAL_NETWORK_PROBE", token }) as Record<string, unknown> | undefined;
   if (!claim?.ok) {
-    respond(token, false, String(claim?.error ?? "本地网络授权已失效，请重新点击配对"));
-    return;
+    return finish(false, String(claim?.error ?? "本地网络授权已失效，请重新点击配对"));
   }
-
-  activeSocket?.close();
-  if (status) status.textContent = "请在浏览器弹窗中点击“允许”…";
+  const host = String(claim.host ?? "").trim();
+  const port = Number(claim.port);
+  if (!isPrivateIpv4(host) || !Number.isInteger(port) || port < 1024 || port > 65535) {
+    return finish(false, "手机地址或端口无效");
+  }
+  if (statusElement) statusElement.textContent = "正在连接；如出现 Chrome 提示，请点击“允许”";
   const socket = new WebSocket(`ws://${host}:${port}/v1/bridge`);
-  activeSocket = socket;
   const timeout = window.setTimeout(() => {
     socket.close();
-    respond(token, false, "等待本地网络权限超时，请重新点击配对");
+    void finish(false, "手机服务未响应。请在手机 App 中停止传递，再重新开始传递后重试。");
   }, 30_000);
   socket.onopen = () => {
     window.clearTimeout(timeout);
     socket.close(1000, "permission granted");
-    activeSocket = null;
-    respond(token, true);
+    void finish(true);
   };
   socket.onerror = () => {
     window.clearTimeout(timeout);
-    activeSocket = null;
-    respond(token, false, "浏览器未允许访问手机，请重新配对并点击“允许”");
+    void finish(false, "无法访问手机。请确认同一 Wi-Fi，并在 Chrome 提示中点击“允许”。");
   };
-}, { passive: true });
+}
 
-function respond(token: string, ok: boolean, error?: string): void {
-  window.parent.postMessage({ type: "OTP_LOCAL_NETWORK_PROBE_RESULT", token, ok, error }, "*");
+async function finish(ok: boolean, error?: string): Promise<void> {
+  if (statusElement) {
+    statusElement.textContent = ok ? "已允许，正在返回配对页面…" : String(error ?? "授权失败");
+    statusElement.classList.toggle("error", !ok);
+  }
+  if (!ok && continueButton) {
+    continueButton.hidden = true;
+  }
+  await chrome.runtime.sendMessage({
+    type: "LOCAL_NETWORK_PROBE_RESULT",
+    token,
+    probeOk: ok,
+    probeError: error
+  }).catch(() => undefined);
 }
 
 function isPrivateIpv4(host: string): boolean {
