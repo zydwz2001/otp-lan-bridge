@@ -55,6 +55,7 @@ class MainActivity : Activity() {
     private lateinit var recentStatus: TextView
     private lateinit var smsSpinner: Spinner
     private lateinit var serviceButton: Button
+    private lateinit var transferHint: TextView
     private lateinit var notificationButton: Button
     private lateinit var backgroundButton: Button
     private lateinit var pairingButton: Button
@@ -110,10 +111,7 @@ class MainActivity : Activity() {
         root.addView(text("手机收到验证码后，传到电脑浏览器填写。", 14f, MUTED)
             .withMargins(top = 4, bottom = 10))
 
-        serviceButton = primaryButton("开始传递") { toggleService() }
-            .also(root::addView)
-
-        root.addView(text("设置步骤", 12f, MUTED, true).withMargins(top = 12, bottom = 3))
+        root.addView(text("第 1 步  完成系统设置", 14f, TEXT, true).withMargins(top = 8, bottom = 3))
         notificationButton = secondaryButton("通知读取设置") {
             if (coordinator.hasNotificationAccess()) {
                 openNotificationAccessSettings()
@@ -124,8 +122,6 @@ class MainActivity : Activity() {
         backgroundButton = secondaryButton("防止后台断开") {
             showBackgroundReliabilityGuide()
         }.withMargins(top = 4).also(root::addView)
-        pairingButton = secondaryButton("配对电脑") { handlePairingAction() }
-            .withMargins(top = 4, bottom = 10).also(root::addView)
 
         listenerWarningCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -141,7 +137,11 @@ class MainActivity : Activity() {
             listenerRepairButton = button("立即重新连接", PRIMARY, Color.WHITE) {
                 handleNotificationAccessAction()
             }.withMargins(top = 9).also(::addView)
-        }.withMargins(bottom = 10).also(root::addView)
+        }.withMargins(top = 4, bottom = 10).also(root::addView)
+
+        root.addView(text("第 2 步  配对电脑", 14f, TEXT, true).withMargins(bottom = 3))
+        pairingButton = secondaryButton("配对电脑") { handlePairingAction() }
+            .withMargins(bottom = 6).also(root::addView)
 
         val mainCard = card()
         serviceStatus = text("准备中", 15f, MUTED, true).also(mainCard::addView)
@@ -153,7 +153,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             addView(text("手机 Wi-Fi 地址", 11f, MUTED))
         }
-        addressStatus = text("开启后显示", 18f, TEXT, true).apply { setTextIsSelectable(true) }
+        addressStatus = text("配对时显示", 18f, TEXT, true).apply { setTextIsSelectable(true) }
             .also(addressColumn::addView)
         connectionRow.addView(addressColumn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         val portColumn = LinearLayout(this).apply {
@@ -186,14 +186,21 @@ class MainActivity : Activity() {
         }.also(codeRow::addView)
         mainCard.addView(codeRow)
 
-        mainCard.addView(text("短信应用", 11f, MUTED))
+        root.addView(mainCard, matchWrap())
+
+        root.addView(text("第 3 步  开始传递", 14f, TEXT, true).withMargins(top = 12, bottom = 3))
+        val startCard = card()
+        startCard.addView(text("短信应用", 11f, MUTED))
         smsSpinner = Spinner(this).apply {
             backgroundTintList = ColorStateList.valueOf(PRIMARY)
-        }.also { mainCard.addView(it, matchWrap()) }
-
-        notificationStatus = text("通知权限：检查中", 12f, MUTED).withMargins(top = 8)
-            .also(mainCard::addView)
-        root.addView(mainCard, matchWrap())
+        }.also { startCard.addView(it, matchWrap()) }
+        notificationStatus = text("通知读取：检查中", 12f, MUTED).withMargins(top = 5)
+            .also(startCard::addView)
+        serviceButton = primaryButton("开始传递") { toggleService() }
+            .withMargins(top = 7).also(startCard::addView)
+        transferHint = text("请先完成上方配对", 12f, MUTED).withMargins(top = 5)
+            .also(startCard::addView)
+        root.addView(startCard, matchWrap())
 
         plainButton("发送测试验证码（可选）") {
             val ok = coordinator.sendSyntheticNotification()
@@ -213,9 +220,9 @@ class MainActivity : Activity() {
         guide.addView(text("首次使用流程", 16f, TEXT, true))
         guide.addView(text("1  点“通知读取设置”，开启通知读取", 13f, TEXT).withMargins(top = 10))
         guide.addView(text("2  点“防止后台断开”，允许自启动", 13f, TEXT).withMargins(top = 7))
-        guide.addView(text("3  选择短信应用，点“开始传递”", 13f, TEXT).withMargins(top = 7))
-        guide.addView(text("4  点“配对电脑”，按插件提示填写信息", 13f, TEXT).withMargins(top = 7))
-        guide.addView(text("5  浏览器询问访问本地网络时，点“允许”", 13f, TEXT).withMargins(top = 7))
+        guide.addView(text("3  点“配对电脑”，按插件提示填写信息", 13f, TEXT).withMargins(top = 7))
+        guide.addView(text("4  浏览器询问访问本地网络时，点“允许”", 13f, TEXT).withMargins(top = 7))
+        guide.addView(text("5  选择短信应用，点“开始传递”", 13f, TEXT).withMargins(top = 7))
         guide.addView(text("6  网页输入手机号，用插件填充并等待", 13f, TEXT).withMargins(top = 7))
         root.addView(guide)
 
@@ -265,8 +272,14 @@ class MainActivity : Activity() {
     private fun handlePairingAction() {
         val snapshot = coordinator.snapshot()
         if (!snapshot.paired) {
-            if (!snapshot.enabled) {
-                Toast.makeText(this, "请先开始传递", Toast.LENGTH_SHORT).show()
+            if (!coordinator.hasNotificationAccess()) {
+                showNotificationAccessGuideIfNeeded(force = true)
+                return
+            }
+            if (!snapshot.running) coordinator.startServer()
+            if (!coordinator.snapshot().running) {
+                Toast.makeText(this, coordinator.snapshot().diagnostic, Toast.LENGTH_LONG).show()
+                renderState()
                 return
             }
             coordinator.regeneratePairCode()
@@ -288,23 +301,21 @@ class MainActivity : Activity() {
         val snapshot = coordinator.snapshot()
         val notificationGranted = coordinator.hasNotificationAccess()
         serviceStatus.text = when {
-            snapshot.enabled && !notificationGranted -> "⚠  请开启通知读取"
-            snapshot.enabled && !snapshot.notificationListenerConnected -> "正在自动恢复通知读取"
-            snapshot.running -> "●  正在传递"
-            snapshot.enabled -> "正在恢复连接"
-            else -> "尚未开始"
+            snapshot.paired && snapshot.clientOnline -> "●  已配对，浏览器在线"
+            snapshot.paired -> "✓  已配对"
+            snapshot.running -> "等待电脑配对"
+            else -> "尚未配对"
         }
         serviceStatus.setTextColor(when {
-            snapshot.enabled && !notificationGranted -> ERROR
-            snapshot.enabled && !snapshot.notificationListenerConnected -> PRIMARY
-            snapshot.running -> SUCCESS
+            snapshot.paired -> SUCCESS
+            snapshot.running -> PRIMARY
             else -> MUTED
         })
-        addressStatus.text = snapshot.boundAddress ?: "开启后显示"
+        addressStatus.text = snapshot.boundAddress ?: "配对时显示"
         portStatus.text = snapshot.port.toString()
         pairCodeStatus.text = when {
             snapshot.paired -> "已配对"
-            snapshot.enabled && snapshot.pairCode != null -> snapshot.pairCode
+            snapshot.running && snapshot.pairCode != null -> snapshot.pairCode
             else -> "------"
         }
         pairCodeStatus.letterSpacing = if (snapshot.paired) 0f else .12f
@@ -340,11 +351,17 @@ class MainActivity : Activity() {
         applyCompletedIcon(notificationButton, notificationGranted)
         applyCompletedIcon(backgroundButton, isBackgroundReliabilityEnabled())
         serviceButton.text = if (snapshot.enabled) "停止传递" else "开始传递"
-        serviceButton.isEnabled = snapshot.enabled || notificationGranted
-        pairingButton.text = if (snapshot.paired) "取消" else "配对电脑"
+        pairingButton.text = if (snapshot.paired) "取消配对" else "配对电脑"
         pairingButton.backgroundTintList = ColorStateList.valueOf(if (snapshot.paired) DISABLED_BACKGROUND else Color.WHITE)
         pairingButton.setTextColor(if (snapshot.paired) MUTED else PRIMARY)
-        pairingButton.isEnabled = snapshot.enabled || snapshot.paired
+        pairingButton.isEnabled = notificationGranted || snapshot.paired
+        serviceButton.isEnabled = snapshot.enabled || (notificationGranted && snapshot.paired)
+        transferHint.text = when {
+            snapshot.enabled -> "已开始，可退出 App 或锁屏"
+            !notificationGranted -> "请先完成“通知读取设置”"
+            !snapshot.paired -> "请先完成上方配对"
+            else -> "准备完成，点击“开始传递”"
+        }
         detailStatus.text = snapshot.diagnostic
         recentStatus.text = snapshot.lastCode?.let { code ->
             "最近验证码：$code  ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(snapshot.lastCodeAt ?: 0))}"
