@@ -59,7 +59,9 @@ class BridgeSocketServer(
 
     init {
         setReuseAddr(true)
-        connectionLostTimeout = 0
+        // Drop half-open browser connections so a cancelled Chrome permission
+        // request cannot leave the phone bridge stuck until the app is restarted.
+        connectionLostTimeout = 20
     }
 
     override fun onStart() {

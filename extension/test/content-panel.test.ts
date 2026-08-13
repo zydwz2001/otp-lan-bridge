@@ -10,6 +10,7 @@ it("opens phone and pairing settings inside the floating panel", async () => {
   vi.spyOn(window, "setInterval").mockReturnValue(1);
 
   const openOptionsPage = vi.fn();
+  const runtimeListeners = new Set<(message: Record<string, unknown>) => unknown>();
   let paired = false;
   let savedHost = "";
   let savedPort = 0;
@@ -43,7 +44,10 @@ it("opens phone and pairing settings inside the floating panel", async () => {
   });
   vi.stubGlobal("chrome", {
     runtime: {
-      onMessage: { addListener: vi.fn() },
+      onMessage: {
+        addListener: vi.fn((listener: (message: Record<string, unknown>) => unknown) => runtimeListeners.add(listener)),
+        removeListener: vi.fn((listener: (message: Record<string, unknown>) => unknown) => runtimeListeners.delete(listener))
+      },
       sendMessage,
       openOptionsPage,
       getURL: (path: string) => `chrome-extension://test-id/${path}`
@@ -80,23 +84,21 @@ it("opens phone and pairing settings inside the floating panel", async () => {
   pairCode.value = "123456";
   const pairButton = [...shadow!.querySelectorAll("button")].find((button) => button.textContent === "配对手机")!;
   pairButton.click();
-  const permissionFrame = await vi.waitFor(() => {
-    const frame = shadow!.querySelector<HTMLIFrameElement>(".permission-frame");
-    expect(frame).not.toBeNull();
-    return frame!;
+  const authorizationCall = await vi.waitFor(() => {
+    const call = sendMessage.mock.calls.find(([message]) => message.type === "AUTHORIZE_LOCAL_NETWORK_PROBE");
+    expect(call).not.toBeUndefined();
+    return call![0];
   });
-  const token = decodeURIComponent(permissionFrame.src.split("#")[1] ?? "");
-  expect(permissionFrame.allow).toBe("local-network-access");
+  const token = String(authorizationCall.token);
   expect(sendMessage).toHaveBeenCalledWith({
     type: "AUTHORIZE_LOCAL_NETWORK_PROBE",
     token,
     host: "192.168.18.52",
     port: 42871
   });
-  window.dispatchEvent(new MessageEvent("message", {
-    source: permissionFrame.contentWindow,
-    data: { type: "OTP_LOCAL_NETWORK_PROBE_RESULT", token, ok: true }
-  }));
+  for (const listener of [...runtimeListeners]) {
+    listener({ type: "LOCAL_NETWORK_PROBE_RESULT", token, probeOk: true });
+  }
   await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
     type: "PAIR",
     host: "192.168.18.52",

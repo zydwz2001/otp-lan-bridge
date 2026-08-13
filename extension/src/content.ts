@@ -343,7 +343,7 @@ class BridgePanel {
       pairingSection.append(
         pairCode.field,
         pairButton,
-        element("p", "settings-help", "浏览器询问访问本地网络设备时，请点击“允许”。")
+        element("p", "settings-help", "如 Chrome 询问访问本地网络设备，请点击“允许”。")
       );
     } else {
       const saveAddressButton = element("button", "button primary", "保存新地址并重连") as HTMLButtonElement;
@@ -393,38 +393,29 @@ class BridgePanel {
 
   private async requestLocalNetworkPermission(host: string, port: number): Promise<void> {
     const token = crypto.randomUUID();
-    const authorization = await chrome.runtime.sendMessage({
-      type: "AUTHORIZE_LOCAL_NETWORK_PROBE",
-      token,
-      host,
-      port
-    }) as Record<string, unknown> | undefined;
-    if (!authorization?.ok) throw new Error(String(authorization?.error ?? "无法申请浏览器本地网络权限"));
-    const frame = document.createElement("iframe");
-    frame.className = "permission-frame";
-    frame.title = "浏览器本地网络权限";
-    frame.allow = "local-network-access";
-    frame.src = chrome.runtime.getURL(`pair-permission.html#${encodeURIComponent(token)}`);
-
     await new Promise<void>((resolve, reject) => {
       let timeout = 0;
       const finish = (error?: Error): void => {
         window.clearTimeout(timeout);
-        window.removeEventListener("message", onMessage);
-        frame.remove();
+        chrome.runtime.onMessage.removeListener(onMessage);
         if (error) reject(error); else resolve();
       };
-      const onMessage = (event: MessageEvent<Record<string, unknown>>): void => {
-        if (event.source !== frame.contentWindow || event.data?.type !== "OTP_LOCAL_NETWORK_PROBE_RESULT" || event.data.token !== token) return;
-        if (event.data.ok === true) finish();
-        else finish(new Error(String(event.data.error ?? "浏览器未允许访问手机")));
+      const onMessage = (message: Record<string, unknown>): false => {
+        if (message.type !== "LOCAL_NETWORK_PROBE_RESULT" || message.token !== token) return false;
+        if (message.probeOk === true) finish();
+        else finish(new Error(String(message.probeError ?? "浏览器未允许访问手机")));
+        return false;
       };
-      window.addEventListener("message", onMessage);
-      frame.addEventListener("load", () => {
-        frame.contentWindow?.postMessage({ type: "OTP_LOCAL_NETWORK_PROBE", token, host, port }, "*");
-      }, { once: true });
-      timeout = window.setTimeout(() => finish(new Error("等待浏览器本地网络权限超时，请重新点击配对")), 35_000);
-      this.settingsArea.append(frame);
+      chrome.runtime.onMessage.addListener(onMessage);
+      timeout = window.setTimeout(() => finish(new Error("授权窗口等待超时，请关闭窗口后重新点击配对")), 50_000);
+      void chrome.runtime.sendMessage({
+        type: "AUTHORIZE_LOCAL_NETWORK_PROBE",
+        token,
+        host,
+        port
+      }).then((authorization: Record<string, unknown> | undefined) => {
+        if (!authorization?.ok) finish(new Error(String(authorization?.error ?? "无法打开浏览器授权窗口")));
+      }).catch(() => finish(new Error("无法打开浏览器授权窗口")));
     });
   }
 
@@ -632,6 +623,6 @@ const styles = `<style>
   main{display:grid;gap:7px}.hint,.eyebrow,.expires{margin:0;color:#7a8596;font-size:9px}.hint,.eyebrow{text-align:center}.countdown,.code{text-align:center;font-variant-numeric:tabular-nums}.countdown{font-size:24px;font-weight:750;color:#1f2937}.code{font-size:29px;font-weight:850;letter-spacing:.1em;color:#2563eb}.expires{text-align:center}
   .button,.choice{appearance:none;border:0;border-radius:8px;min-height:32px;padding:6px 9px;font-family:inherit;font-size:10px;font-weight:700;line-height:1.25;white-space:nowrap;cursor:pointer}.button[hidden]{display:none!important}.button:disabled,.choice:disabled{cursor:not-allowed}.primary{background:#2563eb;color:#fff}.primary:hover{background:#1d4ed8}.primary:disabled{background:#e4e7ec;color:#667085}.secondary{background:#edf1f6;color:#435066}.secondary:hover{background:#e2e7ed}.danger{color:#b42318}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:7px}.choices{display:flex;flex-wrap:wrap;gap:6px;justify-content:center}.choice{background:#e8efff;color:#1d4ed8;font-size:17px;font-variant-numeric:tabular-nums}
-  .inline-settings{display:grid;gap:6px;margin-top:7px;padding-top:7px;border-top:1px solid #e7ebf0}.inline-settings.hidden{display:none}.settings-section{display:grid;gap:6px}.pairing-section{padding-top:7px;border-top:1px solid #e7ebf0}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.section-title{font-size:11px;font-weight:800;color:#202939}.pair-state{border-radius:999px;background:#f0f2f5;padding:2px 6px;color:#667085;font-size:9px;font-weight:700}.pair-state.paired{background:#e7f8ef;color:#067647}.field{display:grid;gap:3px}.field-label{color:#667085;font-size:9px}.field input,.compact-phone-row input{width:100%;height:30px;border:1px solid #d8dee8;border-radius:7px;outline:0;background:#fff;padding:0 8px;color:#1d2939;font:10px Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}.field input::placeholder,.compact-phone-row input::placeholder{color:#a2aab7}.field input:focus,.compact-phone-row input:focus{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.12)}.compact-phone-row{display:grid;grid-template-columns:minmax(0,1fr) 48px;gap:5px}.compact-save{min-height:30px;padding:5px}.address-row{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(65px,.75fr);gap:5px}.settings-help{margin:0;color:#667085;font-size:9px;line-height:1.45}.permission-frame{width:100%;height:30px;border:0;border-radius:7px;background:#f5f7fa}
+  .inline-settings{display:grid;gap:6px;margin-top:7px;padding-top:7px;border-top:1px solid #e7ebf0}.inline-settings.hidden{display:none}.settings-section{display:grid;gap:6px}.pairing-section{padding-top:7px;border-top:1px solid #e7ebf0}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.section-title{font-size:11px;font-weight:800;color:#202939}.pair-state{border-radius:999px;background:#f0f2f5;padding:2px 6px;color:#667085;font-size:9px;font-weight:700}.pair-state.paired{background:#e7f8ef;color:#067647}.field{display:grid;gap:3px}.field-label{color:#667085;font-size:9px}.field input,.compact-phone-row input{width:100%;height:30px;border:1px solid #d8dee8;border-radius:7px;outline:0;background:#fff;padding:0 8px;color:#1d2939;font:10px Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}.field input::placeholder,.compact-phone-row input::placeholder{color:#a2aab7}.field input:focus,.compact-phone-row input:focus{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.12)}.compact-phone-row{display:grid;grid-template-columns:minmax(0,1fr) 48px;gap:5px}.compact-save{min-height:30px;padding:5px}.address-row{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(65px,.75fr);gap:5px}.settings-help{margin:0;color:#667085;font-size:9px;line-height:1.45}
   .error{margin:6px 0 0;color:#c43c3c;font-size:9px}.error[data-kind="success"]{color:#067647}.error:empty{display:none}footer{display:flex;justify-content:space-between;margin-top:7px;padding-top:6px;border-top:1px solid #edf0f3}.link{border:0;background:transparent;padding:1px;color:#748093;font-family:inherit;font-size:9px;line-height:1.2;cursor:pointer}.link:hover{color:#2563eb;text-decoration:underline}
 </style>`;

@@ -6,8 +6,12 @@
   <link rel="stylesheet" href="pair-permission.css">
 </head>
 <body>
-  <span class="dot" aria-hidden="true"></span>
-  <span id="status">正在请求浏览器访问手机…</span>
+  <div class="brand"><span class="mark">✓</span><strong>验证码传递</strong></div>
+  <h1>连接手机</h1>
+  <p>点击后开始连接。如果 Chrome 显示本地网络访问提示，请选择“允许”；已经允许过时不会重复提示。</p>
+  <button id="continue" type="button">连接手机</button>
+  <div class="state"><span class="dot" aria-hidden="true"></span><span id="status">等待你点击上面的按钮</span></div>
+  <p class="fallback">一直没有结果？请在手机 App 点“停止传递”，再点“开始传递”，然后回到网页重新配对。</p>
   <script type="module" src="pair-permission.js"></script>
 </body>
 </html>

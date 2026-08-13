@@ -3,7 +3,7 @@
   "name": "验证码传递",
   "short_name": "验证码传递",
   "description": "把手机收到的短信验证码传到电脑，并在确认后填入网页。",
-  "version": "2.1.3",
+  "version": "2.1.4",
   "minimum_chrome_version": "116",
   "permissions": ["storage", "tabs", "alarms"],
   "host_permissions": ["http://*/*", "https://*/*"],
@@ -12,12 +12,6 @@
     "type": "module"
   },
   "options_page": "options.html",
-  "web_accessible_resources": [
-    {
-      "resources": ["pair-permission.html", "pair-permission.js", "pair-permission.css"],
-      "matches": ["http://*/*", "https://*/*"]
-    }
-  ],
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
