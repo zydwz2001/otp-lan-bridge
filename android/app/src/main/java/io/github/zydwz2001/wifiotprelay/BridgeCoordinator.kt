@@ -46,7 +46,7 @@ class BridgeCoordinator(private val context: Context) {
             config,
             pairCodeProvider = { currentPairCode() },
             pairingAllowed = { activityVisible },
-            notificationAccessProvider = { hasNotificationAccess() },
+            notificationAccessProvider = { hasNotificationAccess() && OtpNotificationListener.isConnected },
             onPairingComplete = { pairCode = null },
             onOtpAcknowledged = {
                 lastCode = null
