@@ -3,7 +3,9 @@ package io.github.zydwz2001.wifiotprelay
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.AlertDialog
+import android.app.AppOpsManager
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -16,6 +18,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.provider.Settings
 import android.provider.Telephony
 import android.view.Gravity
@@ -271,10 +274,10 @@ class MainActivity : Activity() {
             return
         }
         AlertDialog.Builder(this)
-            .setTitle("重新配对电脑？")
-            .setMessage("当前电脑会断开，之后需要在插件中重新输入配对码。")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("重新配对") { _, _ ->
+            .setTitle("取消配对？")
+            .setMessage("当前电脑会断开。以后使用时，需要重新配对。")
+            .setNegativeButton("返回", null)
+            .setPositiveButton("取消配对") { _, _ ->
                 coordinator.unpair()
                 renderState()
             }
@@ -334,9 +337,14 @@ class MainActivity : Activity() {
             listenerWarningHelp.text = "点击下方按钮，在系统页面打开“验证码传递 · 通知读取”，然后返回本页。"
             listenerRepairButton.text = "立即开启通知读取"
         }
+        applyCompletedIcon(notificationButton, notificationGranted)
+        applyCompletedIcon(backgroundButton, isBackgroundReliabilityEnabled())
         serviceButton.text = if (snapshot.enabled) "停止传递" else "开始传递"
         serviceButton.isEnabled = snapshot.enabled || notificationGranted
-        pairingButton.isEnabled = snapshot.enabled
+        pairingButton.text = if (snapshot.paired) "取消" else "配对电脑"
+        pairingButton.backgroundTintList = ColorStateList.valueOf(if (snapshot.paired) DISABLED_BACKGROUND else Color.WHITE)
+        pairingButton.setTextColor(if (snapshot.paired) MUTED else PRIMARY)
+        pairingButton.isEnabled = snapshot.enabled || snapshot.paired
         detailStatus.text = snapshot.diagnostic
         recentStatus.text = snapshot.lastCode?.let { code ->
             "最近验证码：$code  ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(snapshot.lastCodeAt ?: 0))}"
@@ -386,6 +394,35 @@ class MainActivity : Activity() {
             )
         } catch (_: Exception) {
             startActivity(Intent(Settings.ACTION_SETTINGS))
+        }
+    }
+
+    private fun applyCompletedIcon(target: Button, completed: Boolean) {
+        if (!completed) {
+            target.setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, 0, 0)
+            return
+        }
+        target.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_step_complete, 0, 0, 0)
+        target.compoundDrawableTintList = ColorStateList.valueOf(SUCCESS)
+        target.compoundDrawablePadding = dp(7)
+    }
+
+    private fun isBackgroundReliabilityEnabled(): Boolean {
+        if (!isXiaomiDevice()) {
+            return Build.VERSION.SDK_INT >= 28 &&
+                !getSystemService(ActivityManager::class.java).isBackgroundRestricted
+        }
+        return try {
+            val manager = getSystemService(AppOpsManager::class.java)
+            val method = manager.javaClass.getMethod(
+                "checkOpNoThrow",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                String::class.java
+            )
+            method.invoke(manager, MIUI_AUTOSTART_OP, Process.myUid(), packageName) == AppOpsManager.MODE_ALLOWED
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -550,6 +587,7 @@ class MainActivity : Activity() {
     companion object {
         private const val REQUEST_NOTIFICATIONS = 10
         private const val LISTENER_LONG_RECOVERY_MS = 90_000L
+        private const val MIUI_AUTOSTART_OP = 10_008
         private val BACKGROUND = Color.rgb(246, 248, 251)
         private val TEXT = Color.rgb(26, 35, 49)
         private val MUTED = Color.rgb(102, 112, 133)
@@ -559,5 +597,6 @@ class MainActivity : Activity() {
         private val ERROR = Color.rgb(180, 35, 24)
         private val WARNING_BACKGROUND = Color.rgb(255, 247, 237)
         private val WARNING_BORDER = Color.rgb(253, 186, 116)
+        private val DISABLED_BACKGROUND = Color.rgb(229, 233, 239)
     }
 }
