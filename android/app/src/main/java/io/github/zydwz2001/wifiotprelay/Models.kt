@@ -1,4 +1,4 @@
-package dev.otplanbridge
+package io.github.zydwz2001.wifiotprelay
 
 data class NotificationPayload(
     val packageName: String,

@@ -1,4 +1,4 @@
-package dev.otplanbridge
+package io.github.zydwz2001.wifiotprelay
 
 import android.util.Base64
 import org.json.JSONObject
@@ -69,13 +69,13 @@ object CryptoBox {
     fun pairingKey(sharedSecret: ByteArray, pairCode: String): ByteArray = hkdf(
         sharedSecret,
         sha256(pairCode.toByteArray(StandardCharsets.UTF_8)),
-        "otp-lan-bridge/pairing/v1".toByteArray(StandardCharsets.UTF_8)
+        "wifi-otp-relay/pairing/v1".toByteArray(StandardCharsets.UTF_8)
     )
 
     fun sessionKey(pairingKey: ByteArray, clientNonce: ByteArray, serverNonce: ByteArray, sessionId: String): ByteArray = hkdf(
         pairingKey,
         clientNonce + serverNonce,
-        "otp-lan-bridge/session/v1|$sessionId".toByteArray(StandardCharsets.UTF_8)
+        "wifi-otp-relay/session/v1|$sessionId".toByteArray(StandardCharsets.UTF_8)
     )
 
     fun encryptEnvelope(

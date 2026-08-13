@@ -1,4 +1,4 @@
-package dev.otplanbridge
+package io.github.zydwz2001.wifiotprelay
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

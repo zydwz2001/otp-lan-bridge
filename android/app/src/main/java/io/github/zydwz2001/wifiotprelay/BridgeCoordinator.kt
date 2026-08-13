@@ -1,4 +1,4 @@
-package dev.otplanbridge
+package io.github.zydwz2001.wifiotprelay
 
 import android.app.NotificationManager
 import android.content.ComponentName
@@ -11,7 +11,6 @@ import android.provider.Settings
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.NetworkInterface
 import java.security.SecureRandom
 
 class BridgeCoordinator(private val context: Context) {
@@ -20,7 +19,7 @@ class BridgeCoordinator(private val context: Context) {
     @Volatile private var server: BridgeSocketServer? = null
     @Volatile private var activityVisible = false
     @Volatile private var pairCode: PairCodeState? = null
-    @Volatile private var diagnostic = "桥接服务未启用"
+    @Volatile private var diagnostic = "验证码传递尚未开始"
     @Volatile private var lastObservedNotificationPackage: String? = null
     @Volatile private var lastObservedNotificationAt: Long? = null
     @Volatile private var lastCode: String? = null
@@ -31,7 +30,7 @@ class BridgeCoordinator(private val context: Context) {
     fun startServer() {
         val address = findLanAddress()
         if (address == null) {
-            diagnostic = "未检测到可用的 Wi-Fi/LAN IPv4 地址"
+            diagnostic = "手机未连接 Wi-Fi"
             stopServerInternal()
             return
         }
@@ -40,9 +39,9 @@ class BridgeCoordinator(private val context: Context) {
 
         stopServerInternal()
         val created = BridgeSocketServer(
-            // Listen on loopback as well as Wi-Fi so `adb forward` can provide a
-            // cable-only transport when the access point isolates its clients.
-            InetSocketAddress("0.0.0.0", config.port),
+            // Bind only to the Wi-Fi interface. This edition intentionally does
+            // not expose the bridge through VPN, USB forwarding or mobile data.
+            InetSocketAddress(address, config.port),
             address,
             config,
             pairCodeProvider = { currentPairCode() },
@@ -58,17 +57,17 @@ class BridgeCoordinator(private val context: Context) {
         server = created
         try {
             created.start()
-            diagnostic = "正在启动局域网服务"
+            diagnostic = "正在启动验证码传递"
         } catch (_: Exception) {
             server = null
-            diagnostic = "局域网服务启动失败，请检查端口是否被占用"
+            diagnostic = "启动失败，请重新尝试"
         }
     }
 
     @Synchronized
     fun stopServer() {
         stopServerInternal()
-        diagnostic = "桥接服务已暂停"
+        diagnostic = "验证码传递已停止"
     }
 
     @Synchronized
@@ -235,16 +234,12 @@ class BridgeCoordinator(private val context: Context) {
     private fun findLanAddress(): String? {
         val manager = context.getSystemService(ConnectivityManager::class.java)
         val connectivityAddresses = manager.allNetworks
+            .filter { network ->
+                manager.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            }
             .flatMap { network -> manager.getLinkProperties(network)?.linkAddresses.orEmpty() }
             .map { it.address }
-        val interfaceAddresses = try {
-            NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
-                .filter { it.isUp && !it.isLoopback }
-                .flatMap { it.inetAddresses.toList() }
-        } catch (_: Exception) {
-            emptyList()
-        }
-        return selectBridgeAddress(connectivityAddresses + interfaceAddresses)?.hostAddress
+        return selectWifiAddress(connectivityAddresses)?.hostAddress
     }
 
     @Synchronized
@@ -261,19 +256,8 @@ class BridgeCoordinator(private val context: Context) {
     }
 }
 
-internal fun selectBridgeAddress(addresses: List<InetAddress>): Inet4Address? {
-    val candidates = addresses
+internal fun selectWifiAddress(addresses: List<InetAddress>): Inet4Address? = addresses
         .filterIsInstance<Inet4Address>()
-        .filterNot { it.isLoopbackAddress || it.isLinkLocalAddress }
+        .filter { it.isSiteLocalAddress && !it.isLoopbackAddress && !it.isLinkLocalAddress }
         .distinctBy { it.hostAddress }
-    return candidates.firstOrNull(::isTailscaleAddress)
-        ?: candidates.firstOrNull { it.isSiteLocalAddress }
-}
-
-internal fun isTailscaleAddress(address: InetAddress): Boolean {
-    val bytes = address.address
-    if (bytes.size != 4) return false
-    val first = bytes[0].toInt() and 0xff
-    val second = bytes[1].toInt() and 0xff
-    return first == 100 && second in 64..127
-}
+        .firstOrNull()

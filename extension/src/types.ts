@@ -72,7 +72,7 @@ export interface FocusTarget {
 export const DEFAULT_CONFIG: ExtensionConfig = {
   phoneNumber: "",
   host: "",
-  port: 41837,
+  port: 0,
   clientId: "",
   allowedDomains: [],
   excludedDomains: [],

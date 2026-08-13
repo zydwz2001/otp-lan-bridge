@@ -1,90 +1,127 @@
-# OTP LAN Bridge
+# 验证码传递
 
-> 将 Android 短信通知中的一次性验证码，通过局域网、Tailscale 或 USB 加密传送到 Chrome，并在用户确认后填入当前网页。
+> 手机收到短信验证码后，传到电脑浏览器填写。手机和电脑只需连接同一个 Wi‑Fi。
 
-[![Android 8+](https://img.shields.io/badge/Android-8%2B-3DDC84?logo=android&logoColor=white)](#系统要求)
-[![Chrome 116+](https://img.shields.io/badge/Chrome-116%2B-4285F4?logo=googlechrome&logoColor=white)](#系统要求)
+[![Android 8+](https://img.shields.io/badge/Android-8%2B-3DDC84?logo=android&logoColor=white)](#运行要求)
+[![Chrome 116+](https://img.shields.io/badge/Chrome-116%2B-4285F4?logo=googlechrome&logoColor=white)](#运行要求)
+[![CI](https://github.com/zydwz2001/otp-lan-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/zydwz2001/otp-lan-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-OTP LAN Bridge 由一个 Android App 和一个 Chrome Manifest V3 扩展组成。它不依赖公网中转服务，不申请 `READ_SMS` 或 `RECEIVE_SMS` 权限，也不会自动点击网页的“发送验证码”“登录”或“提交”按钮。
+仓库只保留当前的“验证码传递”Android App 和 Chrome 插件。
 
-## 为什么做这个项目
+## 这个版本有什么不同
 
-在电脑上登录网站时，验证码通常到达手机。复制、切换设备和手工输入看似只是几秒，却会在高频登录、申请表单和多账号工作流中不断打断操作。
+| 项目 | 验证码传递 2.1.3 |
+| --- | --- |
+| 连接方式 | 只支持手机与电脑所在的同一 Wi‑Fi |
+| VPN / Tailscale | 不需要，也不会创建或启动 VPN |
+| USB / ADB | 不需要，不支持回环转发 |
+| Android 应用 ID | `io.github.zydwz2001.wifiotprelay` |
+| App 监听端口 | App 当前显示的端口（当前版本通常为 `42871`） |
+| 产品界面 | Android App、扩展设置页、网页悬浮面板均为全新设计 |
+| 协议身份 | 使用独立的 v2 本地存储名称、密钥别名和 HKDF 域分离字符串 |
 
-本项目把这段流程缩短为：
-
-1. 在网页中选中手机号输入框，点击扩展面板填入手机号。
-2. 用户自己点击网站的“发送验证码”。
-3. Android 仅在 5 分钟等待窗口内读取指定短信应用的新通知。
-4. 验证码通过加密 WebSocket 到达发起等待的标签页。
-5. 用户点击扩展面板，将验证码填入当前输入框。
-
-项目始终把发送、填充和提交的最终决定留给用户。
-
-## 核心特性
-
-- **最小权限**：Android 使用通知监听，不读取短信数据库；无需 `READ_SMS`、`RECEIVE_SMS`。
-- **本地优先**：支持同一局域网、Tailscale 私有网络和 USB ADB 转发，不需要自建公网服务器。
-- **端到端保护**：P-256 ECDH、HKDF、AES-256-GCM、随机 nonce、单调序号和重放保护。
-- **显式等待窗口**：没有浏览器发起的有效等待会话时，App 不处理通知正文。
-- **风险拦截**：包含银行、支付、付款、钱包、转账、交易等高风险关键词的通知不会转发。
-- **通用网页填充**：支持原生输入框、`textarea`、`contenteditable`、常见前端框架和分格 OTP 输入框。
-- **不自动提交**：扩展只填值，不点击发送、登录、确认或提交按钮。
-- **持久配对**：首次使用 6 位临时码配对；后续重启通常只需让两端网络和服务恢复，不必重复配对。
-
-## 工作原理
-
-```mermaid
-sequenceDiagram
-    participant User as 用户
-    participant Web as 当前网页
-    participant Ext as Chrome 扩展
-    participant App as Android App
-    participant SMS as 短信通知
-
-    User->>Ext: 点击“填充手机号”
-    Ext->>App: 建立 5 分钟等待会话
-    User->>Web: 手动点击“发送验证码”
-    SMS-->>App: 指定短信应用产生新通知
-    App->>App: 解析、评分、去重和风险拦截
-    App-->>Ext: 加密发送验证码候选
-    Ext-->>User: 显示验证码
-    User->>Ext: 点击“填充验证码”
-    Ext->>Web: 写入当前输入框
-```
-
-## 系统要求
+## 运行要求
 
 - Android 8.0（API 26）或更高版本。
-- Chrome 116 或更高版本。
-- Android 构建：JDK 17、Android SDK Platform 35。
-- Chrome 扩展构建：Node.js 20 或更高版本。
+- Chrome 116 或更高版本；Chrome 142+ 首次连接时可能询问“访问本地网络”，请选择允许。
+- 手机与电脑必须连接同一个可互访的 Wi‑Fi。宾馆、学校、公司访客网如果开启了“客户端隔离”，即使 Wi‑Fi 名称相同也可能无法直连。
 
-目前仅支持 Android。iOS 不允许普通 App 以相同方式读取其他 App 的通知，因此不能直接复用此实现。
+## 下载与安装
 
-## 快速开始
+最简单的方式是在仓库的 [Releases](https://github.com/zydwz2001/otp-lan-bridge/releases) 页面下载两个文件：
 
-### 1. 构建 Android App
+- `verification-code-transfer-android.apk`：安装到 Android 手机。
+- `verification-code-transfer-chrome.zip`：解压后加载到 Chrome。
+
+如果当前还没有 Release，可按下面的“从源码构建”生成相同内容。
+
+### 安装 Android App
+
+1. 把 APK 发送到手机并打开。
+2. Android 若提示“禁止安装未知应用”，只为当前文件管理器临时允许。
+3. 安装后桌面会出现“验证码传递”。
+
+### 安装 Chrome 插件
+
+1. 解压 `verification-code-transfer-chrome.zip`，不要直接选择 ZIP。
+2. Chrome 打开 `chrome://extensions`。
+3. 打开右上角“开发者模式”。
+4. 点击“加载已解压的扩展程序”，选择解压后的目录（目录中应直接看到 `manifest.json`）。
+5. 打开扩展详情，点击“扩展程序选项”进入设置页。
+
+完整图文式操作顺序见 [Chrome 插件使用方法](docs/EXTENSION_GUIDE.md) 和 [Android App 使用方法](docs/ANDROID_APP.md)。
+
+## 首次连接
+
+1. 手机和电脑连接同一个 Wi‑Fi；关闭 VPN 不是硬性要求，但本项目不会使用 VPN 地址。
+2. 打开手机 App，按照首次引导开启“验证码传递 · 通知读取”，选择短信 App，然后点击“开始传递”。
+3. App 会把 Wi-Fi 地址（例如 `192.168.1.23`）、端口 `42871` 和 6 位临时配对码分开显示。
+4. 在网页浮窗点击“展开设置”，分别输入手机地址、端口和配对码，点击“配对手机”。
+5. Chrome 首次询问“访问本地网络中的其他设备”时选择“允许”。
+6. 在扩展中填写常用手机号并保存。
+
+配对完成后，两端会各自保存一份配对材料。正常重启、关闭浏览器或切换网页都不需要重新配对；手机 Wi‑Fi 地址发生变化时，在扩展中更新地址并重新连接即可。
+
+## 日常使用
+
+1. 确认手机 App 显示“正在传递”。
+2. 在网页点击手机号输入框，再点右侧悬浮面板的“一键填充并等待”。
+3. 自己点击网站的“发送验证码”。
+4. 短信到达后，手机只解析所选短信 App 的新通知，并把验证码候选通过加密 WebSocket 发给当前等待标签页。
+5. 无需点击验证码输入框，直接点悬浮面板的“写入验证码并登录”。
+6. 插件仅在能明确识别同一表单的登录按钮时自动点击；否则只填入验证码，由你确认提交。
+
+## 权限与安全边界
+
+- Android 不申请 `READ_SMS` 或 `RECEIVE_SMS`，只使用系统“通知使用权”读取所选短信 App 的新通知。
+- 服务只绑定 Android 的 Wi‑Fi IPv4 地址，并拒绝回环、链路本地、Tailscale CGNAT 和公网来源。
+- 首次配对使用 P‑256 ECDH、HKDF 和 6 位临时码；会话消息使用 AES‑256‑GCM、单调序号、时间窗和重放保护。
+- 完整短信正文不会落盘或写入日志；Chrome 中的验证码只存于 `chrome.storage.session`，最多 2 分钟。
+- 银行、支付、付款、钱包、转账和交易等高风险通知会在 Android 端直接拦截。
+- 扩展需要普通网页访问权限来识别用户最后点击的输入框，可在设置中配置允许/排除域名。
+
+更完整的威胁边界见 [安全设计](docs/SECURITY.md)。
+
+## 常见问题
+
+### 同一个 Wi‑Fi 仍然无法配对
+
+- 确认输入的是 App 当前显示的地址，不是电脑地址。
+- 保持 App 配对页在前台，配对码过期后点击“换一个配对码”。
+- Chrome 142+ 若询问本地网络访问，必须选择允许。
+- 不要使用 `127.0.0.1`、`100.x.x.x` 或公网 IP；本版本会主动拒绝。
+- 路由器若开启 AP/客户端隔离，请改用普通家庭 Wi‑Fi；本版本有意不提供 VPN/USB 绕过路径。
+
+### 浏览器在线，但真实短信没出现
+
+- 手机状态页应同时显示“通知使用权已允许”和“系统监听已连接”。
+- 选择的短信 App 包名必须与真实通知来源一致。
+- 手机锁屏通知不能隐藏正文，否则 App 无法从通知中读取数字。
+- 必须先点网页面板“一键填充并等待”，然后再让网站发送短信。
+
+更多排查步骤见 [故障排查](docs/TROUBLESHOOTING.md)。
+
+## 从源码构建
+
+### Android
+
+需要 JDK 17 和 Android SDK Platform 35：
 
 ```powershell
 cd android
 .\gradlew.bat testDebugUnitTest lintDebug assembleDebug
 ```
 
-生成的调试 APK 位于：
+APK 输出：
 
 ```text
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-可以将 APK 发送到手机安装，或通过 ADB 安装：
+### Chrome 插件
 
-```powershell
-adb install -r android\app\build\outputs\apk\debug\app-debug.apk
-```
-
-### 2. 构建 Chrome 扩展
+需要 Node.js 20 或更高版本：
 
 ```powershell
 cd extension
@@ -94,110 +131,29 @@ npm test
 npm run build
 ```
 
-然后打开 `chrome://extensions`：
-
-1. 启用“开发者模式”。
-2. 点击“加载已解压的扩展程序”。
-3. 选择 `extension/dist`。
-
-### 3. 配置 Android
-
-1. 打开 OTP LAN Bridge。
-2. 选择系统默认短信应用；无法识别时填写短信应用包名。
-3. 点击“授予通知使用权”，在系统页面中允许“验证码桥接”。
-4. 按手机系统提示允许通知、后台运行和自启动。
-5. 启动桥接服务，记录 App 显示的地址、端口和 6 位临时配对码。
-
-### 4. 完成首次配对
-
-1. 打开扩展设置页。
-2. 填写手机地址、端口和配对码。
-3. 保持 Android App 配对页处于前台，点击“配对”。
-4. Chrome 询问本地网络访问时选择“允许”。
-5. 配对成功后填写常用手机号并保存。
-
-配对码有效期为 30 分钟且仅用于首次配对。配对密钥会分别保存在 Android Keystore 和 Chrome 本地存储中，正常重启后无需重新配对。
-
-## 三种连接方式
-
-| 方式 | 适用场景 | 扩展填写地址 |
-| --- | --- | --- |
-| 局域网 | 手机和电脑可以在同一网络中互访 | App 显示的 `192.168.x.x` 地址 |
-| Tailscale | 更换 Wi-Fi、网络开启客户端隔离或需要稳定私有地址 | 手机的 `100.x.y.z` 地址 |
-| USB | 无线网络不可互访，且可以使用 USB 调试 | `127.0.0.1` |
-
-- Tailscale 配置见 [docs/TAILSCALE_MODE.md](docs/TAILSCALE_MODE.md)。
-- USB 配置见 [docs/USB_MODE.md](docs/USB_MODE.md)。
-
-## 日常使用
-
-1. 确保 Android 桥接服务运行、通知监听已连接。
-2. 使用 Tailscale 时，手机和电脑两端都要保持 Tailscale 已连接；窗口可以关闭，后台服务不能退出。
-3. 点击网页手机号输入框，再点击扩展面板“填充手机号”。
-4. 手动点击网页自己的“发送验证码”。
-5. 验证码到达后，点击网页验证码输入框，再点击扩展面板“填充验证码”。
-
-## 安全与隐私
-
-OTP LAN Bridge 处理的是敏感认证信息，因此默认采用以下边界：
-
-- 完整短信正文只存在于 Android 通知回调的内存中，不写入磁盘或调试日志。
-- 只有用户选定的短信应用通知会被考虑。
-- 只有活动等待会话中的新通知会被解析和发送。
-- OTP 在 Chrome 中只保存于 `chrome.storage.session`，最长保留 2 分钟。
-- 手机号和配对材料不使用 Chrome 同步存储。
-- 所有业务消息均经过认证加密，并校验设备、会话、时间戳、序号和 nonce。
-- 服务只接受回环地址、私有局域网地址和 Tailscale CGNAT 地址，不接受公网来源。
-- 扩展不会自动触发网站操作，避免未经用户确认的发送、登录或提交。
-
-## 常见问题
-
-### 配对时提示无法连接
-
-- 确认 Android App 配对页在前台、桥接服务正在运行。
-- 确认地址和端口与 App 当前显示一致。
-- Chrome 请求“连接本地网络设备”权限时选择允许。
-- 同一 Wi-Fi 仍无法互访时，路由器可能启用了 AP/客户端隔离，请改用 Tailscale 或 USB。
-- 使用 Clash/Mihomo TUN 时，将当前局域网网段或 `100.64.0.0/10` 配置为直连/排除网段。
-
-### 模拟通知正常，真实短信没有传到电脑
-
-- 检查系统通知监听状态是否为“已连接”。
-- 确认选择的短信应用包名与真实通知来源一致。
-- 确认短信通知没有被系统隐私设置隐藏正文。
-- 先在网页点击手机号输入框和“填充手机号”，确保扩展已进入等待状态。
-
-### 重启后是否需要重新配对
-
-通常不需要。只要没有清除 App/扩展数据、解除配对或重新安装，原配对会持续有效。重启后需要恢复 Android 桥接服务，以及局域网/Tailscale/USB 连接。
-
-## 开发与测试
+加载 `extension/dist`，或运行根目录的发布脚本生成 APK 与 ZIP：
 
 ```powershell
-# Android
-cd android
-.\gradlew.bat testDebugUnitTest lintDebug
-
-# Chrome extension
-cd extension
-npm ci
-npm run check
-npm test
-npm run build
+.\tools\build-release.ps1
 ```
 
-## 项目状态
+输出文件位于 `release/`。
 
-当前版本已在 Android 15、Windows 和 Chrome 场景中完成联调，但仍属于早期项目。不同手机厂商的通知隐私策略、后台限制和短信应用实现可能不同，欢迎通过 Issue 提交机型、系统版本、短信应用和复现步骤；请勿在 Issue 中粘贴真实手机号、短信正文或验证码。
+## GitHub 发布
 
-## 贡献
+- 每次 push / pull request 会运行 Android 单元测试、Lint、APK 构建和扩展检查。
+- 推送形如 `v2.1.0` 的标签会自动创建 GitHub Release，并附上可安装 APK 与扩展 ZIP。
+- 自动生成的 APK 使用 Android 调试签名，适合个人侧载；要长期稳定升级或上架应用商店，应换成自己的固定发布签名。
 
-欢迎提交 Issue 和 Pull Request。开始前请确保：
+## 项目结构
 
-- 新增代码不记录短信正文、手机号、验证码或配对密钥。
-- 测试数据使用明显的示例值。
-- Android 和 Chrome 扩展测试全部通过。
-- 不引入默认公网中转或自动提交行为。
+```text
+android/                 Android App
+extension/               “验证码传递”Chrome 插件
+docs/                    App、插件、安全与排查文档
+tools/build-release.ps1  本地一键打包脚本
+.github/workflows/       GitHub CI 与 Release 自动化
+```
 
 ## License
 

@@ -30,12 +30,12 @@ let clientId = "";
 void load();
 
 pairButton.addEventListener("click", () => runBusy(pairButton, async () => {
-  showPairFeedback("正在检查地址和设置…");
+  showPairFeedback("正在检查 Wi-Fi 地址…");
   await save(false);
   const host = hostInput.value.trim();
   const port = Number(portInput.value);
   const pairCode = pairCodeInput.value.trim();
-  showPairFeedback(`正在连接 ${host}:${port}，请保持手机配对页在前台…`);
+  showPairFeedback(`正在连接 ${host}:${port}，请保持手机 App 在前台…`);
   const result = await pairFromVisiblePage(host, port, pairCode);
   const response = await send({ type: "STORE_PAIRING", host, port, ...result });
   if (!response.ok) throw new Error(String(response.error));
@@ -75,7 +75,7 @@ async function load(): Promise<void> {
   }
   const config = response.config as (Omit<ExtensionConfig, "pairingKey" | "panelPositions"> & { paired: boolean });
   hostInput.value = config.host ?? "";
-  portInput.value = String(config.port ?? 41837);
+  portInput.value = config.port >= 1024 ? String(config.port) : "";
   phoneInput.value = config.phoneNumber ?? "";
   soundInput.checked = config.soundEnabled !== false;
   allowedInput.value = (config.allowedDomains ?? []).join("\n");
@@ -170,7 +170,7 @@ async function pairFromVisiblePage(host: string, port: number, pairCode: string)
     const socket = new WebSocket(`ws://${host}:${port}/v1/bridge`);
     const timeout = window.setTimeout(() => {
       socket.close();
-      reject(new Error("配对超时，请确认本地网络访问权限和同一 Wi-Fi"));
+      reject(new Error("配对超时：请确认两台设备在同一个 Wi-Fi，并允许 Chrome 访问本地网络"));
     }, 12_000);
     socket.onopen = () => socket.send(JSON.stringify({
       v: 1,
@@ -195,7 +195,7 @@ async function pairFromVisiblePage(host: string, port: number, pairCode: string)
     };
     socket.onerror = () => {
       window.clearTimeout(timeout);
-      reject(new Error("无法连接手机；若 Chrome 询问本地网络访问，请选择允许"));
+      reject(new Error("无法连接手机；请检查 Wi-Fi 地址，并在 Chrome 提示时允许本地网络访问"));
     };
   });
   const deviceId = String(response.deviceId ?? "");

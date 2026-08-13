@@ -4,15 +4,16 @@ plugins {
 }
 
 android {
-    namespace = "dev.otplanbridge"
+    namespace = "io.github.zydwz2001.wifiotprelay"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "dev.otplanbridge"
+        // Stable application ID for the Wi-Fi verification-code transfer app.
+        applicationId = "io.github.zydwz2001.wifiotprelay"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.0.8"
+        versionCode = 24
+        versionName = "2.1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

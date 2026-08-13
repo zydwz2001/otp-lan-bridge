@@ -62,6 +62,59 @@ export function fillTarget(target: EditableTarget | null, value: string, purpose
   return updated ? { ok: true } : { ok: false, error: "页面拒绝了输入事件" };
 }
 
+export function findOtpTarget(document: Document, previous: EditableTarget | null, code: string): EditableTarget | null {
+  if (previous && isEditableTarget(previous) && isVisible(previous) && classifyTarget(previous) === "otp") return previous;
+  const candidates = Array.from(document.querySelectorAll("input, textarea, [contenteditable='true']"))
+    .filter((value): value is EditableTarget => isEditableTarget(value) && isVisible(value))
+    .map((target) => ({ target, score: otpTargetScore(target, code) }))
+    .filter((entry) => entry.score >= 20)
+    .sort((a, b) => b.score - a.score);
+  return candidates[0]?.target ?? null;
+}
+
+export function submitOtpForm(target: EditableTarget): boolean {
+  const view = target.ownerDocument.defaultView;
+  if (!view) return false;
+  const form = target instanceof view.HTMLInputElement || target instanceof view.HTMLTextAreaElement
+    ? target.form
+    : target.closest("form");
+  if (!form) return false;
+  const controls = Array.from(form.querySelectorAll("button, input[type='submit']"))
+    .filter((control): control is HTMLButtonElement | HTMLInputElement =>
+      (control instanceof view.HTMLButtonElement || control instanceof view.HTMLInputElement) &&
+      !control.disabled && control.getClientRects().length > 0
+    );
+  const safeControls = controls.filter((control) => !/发送|获取|重发|验证码|send\s*code|get\s*code|resend/i.test(controlLabel(control)));
+  const explicit = safeControls.filter((control) => /登录|登陆|注册|提交|确认|继续|完成|log\s*in|sign\s*in|submit|continue|verify/i.test(controlLabel(control)));
+  const selected = explicit.length === 1
+    ? explicit[0]
+    : safeControls.length === 1 && isSubmitControl(safeControls[0]!) ? safeControls[0]
+    : undefined;
+  if (!selected) return false;
+  selected.click();
+  return true;
+}
+
+function otpTargetScore(target: EditableTarget, code: string): number {
+  let score = classifyTarget(target) === "otp" ? 50 : 0;
+  if (target.getAttribute("autocomplete")?.toLowerCase() === "one-time-code") score += 80;
+  if (target instanceof HTMLInputElement) {
+    if (target.maxLength === code.length) score += 35;
+    if (target.maxLength === 1) score += 20;
+    if (target.inputMode === "numeric" || target.type === "number" || target.pattern?.includes("d")) score += 8;
+  }
+  return score;
+}
+
+function controlLabel(control: HTMLButtonElement | HTMLInputElement): string {
+  return `${control.textContent ?? ""} ${control.value ?? ""} ${control.getAttribute("aria-label") ?? ""}`.trim();
+}
+
+function isSubmitControl(control: HTMLButtonElement | HTMLInputElement): boolean {
+  if (control instanceof HTMLInputElement) return control.type === "submit";
+  return !control.type || control.type === "submit";
+}
+
 function findOtpGroup(target: HTMLInputElement): HTMLInputElement[] | null {
   let container: Element | null = target.parentElement;
   for (let depth = 0; container && depth < 5; depth += 1, container = container.parentElement) {

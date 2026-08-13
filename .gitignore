@@ -6,6 +6,7 @@ local.properties
 node_modules/
 dist/
 coverage/
+release/
 *.apk
 *.aab
 *.jks

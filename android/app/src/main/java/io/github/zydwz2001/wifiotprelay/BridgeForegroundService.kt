@@ -1,4 +1,4 @@
-package dev.otplanbridge
+package io.github.zydwz2001.wifiotprelay
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -84,16 +84,16 @@ class BridgeForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val notification = Notification.Builder(this, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle("验证码桥接已启用")
-            .setContentText("正在通过局域网或 Tailscale 等待浏览器连接")
+            .setSmallIcon(R.drawable.ic_wifi_relay)
+            .setContentTitle("验证码传递正在运行")
+            .setContentText("等待电脑浏览器连接")
             .setContentIntent(openIntent)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
             .addAction(
                 Notification.Action.Builder(
                     Icon.createWithResource(this, android.R.drawable.ic_media_pause),
-                    "暂停服务",
+                    "停止传递",
                     stopIntent
                 ).build()
             )
@@ -106,8 +106,8 @@ class BridgeForegroundService : Service() {
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(CHANNEL_ID, "验证码桥接状态", NotificationManager.IMPORTANCE_LOW).apply {
-            description = "保持局域网验证码桥接服务运行"
+        val channel = NotificationChannel(CHANNEL_ID, "验证码传递运行状态", NotificationManager.IMPORTANCE_LOW).apply {
+            description = "保持验证码传递功能运行"
             setShowBadge(false)
         }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
@@ -128,10 +128,10 @@ class BridgeForegroundService : Service() {
     }
 
     companion object {
-        const val ACTION_START = "dev.otplanbridge.action.START"
-        const val ACTION_STOP = "dev.otplanbridge.action.STOP"
-        private const val CHANNEL_ID = "bridge_status"
-        private const val NOTIFICATION_ID = 4101
+        const val ACTION_START = "io.github.zydwz2001.wifiotprelay.action.START"
+        const val ACTION_STOP = "io.github.zydwz2001.wifiotprelay.action.STOP"
+        private const val CHANNEL_ID = "wifi_relay_status"
+        private const val NOTIFICATION_ID = 5201
         private const val NOTIFICATION_LISTENER_RETRY_MS = 30_000L
         private val NETWORK_REFRESH_TOKEN = Any()
     }

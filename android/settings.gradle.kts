@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "OtpLanBridge"
+rootProject.name = "VerificationCodeTransfer"
 include(":app")
