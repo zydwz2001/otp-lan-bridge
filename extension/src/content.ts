@@ -6,7 +6,7 @@ let lastTarget: EditableTarget | null = null;
 let panel: BridgePanel | null = null;
 const policyUrl = effectivePolicyUrl();
 const PANEL_WIDTH = 244;
-const COLLAPSED_WIDTH = 118;
+const COLLAPSED_WIDTH = 132;
 const DEFAULT_TOP = 8;
 
 interface InlineSettingsConfig {
@@ -89,6 +89,7 @@ class BridgePanel {
   private settingsConfig: InlineSettingsConfig | null = null;
   private readonly refreshTimer: number;
   private dragStart: { pointerX: number; pointerY: number; left: number; top: number } | null = null;
+  private dragMoved = false;
 
   constructor(position?: PanelPosition, soundEnabled = true) {
     this.soundEnabled = soundEnabled;
@@ -124,7 +125,10 @@ class BridgePanel {
     const header = required(".header", this.shadow);
     this.settingsButton = required(".settings", this.shadow) as HTMLButtonElement;
     const hide = required(".hide", this.shadow);
-    this.collapseButton.addEventListener("click", () => this.setCollapsed(!this.collapsed));
+    this.collapseButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.setCollapsed(!this.collapsed);
+    });
     this.settingsButton.addEventListener("click", () => { void this.toggleSettings(); });
     hide.addEventListener("click", () => {
       void this.action("HIDE_SITE").then((result) => { if (result) this.destroy(); });
@@ -132,6 +136,14 @@ class BridgePanel {
     header.addEventListener("pointerdown", (event) => this.startDrag(event as PointerEvent));
     header.addEventListener("pointermove", (event) => this.moveDrag(event as PointerEvent));
     header.addEventListener("pointerup", (event) => this.endDrag(event as PointerEvent));
+    header.addEventListener("click", (event) => {
+      if (!this.collapsed || (event.target as Element).closest("button")) return;
+      if (this.dragMoved) {
+        this.dragMoved = false;
+        return;
+      }
+      this.setCollapsed(false);
+    });
     this.applyCollapsed();
     document.documentElement.append(this.host);
     this.refreshTimer = window.setInterval(() => {
@@ -489,9 +501,11 @@ class BridgePanel {
 
   private applyCollapsed(): void {
     this.host.style.width = `${this.collapsed ? COLLAPSED_WIDTH : PANEL_WIDTH}px`;
+    required(".panel", this.shadow).classList.toggle("collapsed", this.collapsed);
     required(".body", this.shadow).classList.toggle("hidden", this.collapsed);
-    this.collapseButton.textContent = this.collapsed ? "+" : "−";
+    this.collapseButton.textContent = "−";
     this.collapseButton.title = this.collapsed ? "展开" : "折叠";
+    this.collapseButton.setAttribute("aria-label", this.collapsed ? "展开" : "折叠");
   }
 
   private startDrag(event: PointerEvent): void {
@@ -500,12 +514,16 @@ class BridgePanel {
     this.host.style.left = `${rect.left}px`;
     this.host.style.top = `${rect.top}px`;
     this.host.style.right = "auto";
+    this.dragMoved = false;
     this.dragStart = { pointerX: event.clientX, pointerY: event.clientY, left: rect.left, top: rect.top };
     (event.currentTarget as Element).setPointerCapture(event.pointerId);
   }
 
   private moveDrag(event: PointerEvent): void {
     if (!this.dragStart) return;
+    if (Math.abs(event.clientX - this.dragStart.pointerX) > 3 || Math.abs(event.clientY - this.dragStart.pointerY) > 3) {
+      this.dragMoved = true;
+    }
     const width = this.host.getBoundingClientRect().width;
     const x = clamp(this.dragStart.left + event.clientX - this.dragStart.pointerX, 8, window.innerWidth - width - 8);
     const y = clamp(this.dragStart.top + event.clientY - this.dragStart.pointerY, 8, window.innerHeight - 48);
@@ -615,8 +633,9 @@ function playTone(): void {
 const styles = `<style>
   :host{all:initial;font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;font-size:13px;line-height:1.35;color:#1a2331}
   *{box-sizing:border-box}
-  .panel{overflow:hidden;border:1px solid #dce2e9;border-radius:14px;background:#fff;box-shadow:0 14px 34px rgba(24,36,54,.16)}
+  .panel{overflow:hidden;border:1px solid #dce2e9;border-radius:14px;background:#fff;box-shadow:0 14px 34px rgba(24,36,54,.16)}.panel.collapsed{border-radius:19px;box-shadow:0 6px 18px rgba(24,36,54,.13)}
   .header{height:38px;display:flex;align-items:center;gap:6px;padding:0 7px 0 9px;background:#f5f7fa;cursor:move;user-select:none;touch-action:none}
+  .panel.collapsed .header{gap:7px;padding:0 10px 0 8px;background:#fff;cursor:pointer}.panel.collapsed .title{flex:none;white-space:nowrap}.panel.collapsed .dot{margin-left:auto}.panel.collapsed .collapse{display:none}
   .signal{display:grid;place-items:center;width:21px;height:21px;border-radius:6px;background:#2563eb;color:#fff;font-size:12px;font-weight:900}.dot{width:7px;height:7px;border-radius:50%;background:#9aa4b2}.dot[data-state="online"]{background:#079669;box-shadow:0 0 0 3px #dcf6eb}.dot[data-state="connecting"]{background:#dc9a1b}.dot[data-state="offline"]{background:#dc5151}
   .title{flex:1;font-size:11px;color:#1a2331}.icon{width:25px;height:25px;border:0;border-radius:7px;background:transparent;color:#667085;font-size:16px;cursor:pointer}.icon:hover{background:#e7ebf0;color:#1a2331}
   .body{max-height:calc(100vh - 48px);overflow-y:auto;padding:9px}.body.hidden{display:none}.meta{display:flex;justify-content:space-between;gap:6px;color:#7a8596;font-size:9px;margin-bottom:7px}

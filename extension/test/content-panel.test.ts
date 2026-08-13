@@ -77,6 +77,15 @@ it("opens phone and pairing settings inside the floating panel", async () => {
   expect((shadow!.host as HTMLElement).style.width).toBe("244px");
   expect(openOptionsPage).not.toHaveBeenCalled();
 
+  const collapseButton = shadow!.querySelector(".collapse") as HTMLButtonElement;
+  collapseButton.click();
+  expect((shadow!.host as HTMLElement).style.width).toBe("132px");
+  expect(shadow!.querySelector(".panel")?.classList.contains("collapsed")).toBe(true);
+  expect(shadow!.querySelector(".title")?.textContent).toBe("验证码传递");
+  (shadow!.querySelector(".header") as HTMLElement).click();
+  expect((shadow!.host as HTMLElement).style.width).toBe("244px");
+  expect(shadow!.querySelector(".panel")?.classList.contains("collapsed")).toBe(false);
+
   const address = shadow!.querySelector<HTMLInputElement>('input[inputmode="decimal"]')!;
   const pairCode = shadow!.querySelector<HTMLInputElement>('input[autocomplete="one-time-code"]')!;
   address.value = "192.168.18.52";
