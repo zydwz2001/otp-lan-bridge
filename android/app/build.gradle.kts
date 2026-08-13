@@ -12,8 +12,8 @@ android {
         applicationId = "io.github.zydwz2001.wifiotprelay"
         minSdk = 26
         targetSdk = 35
-        versionCode = 28
-        versionName = "2.1.7"
+        versionCode = 29
+        versionName = "2.1.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
