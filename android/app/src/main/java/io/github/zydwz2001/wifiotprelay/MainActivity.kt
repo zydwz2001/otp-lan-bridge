@@ -43,7 +43,6 @@ class MainActivity : Activity() {
     private lateinit var listenerWarningTitle: TextView
     private lateinit var listenerWarningHelp: TextView
     private lateinit var listenerRepairButton: Button
-    private lateinit var listenerSettingsButton: Button
     private lateinit var addressStatus: TextView
     private lateinit var portStatus: TextView
     private lateinit var pairCodeStatus: TextView
@@ -54,6 +53,7 @@ class MainActivity : Activity() {
     private lateinit var smsSpinner: Spinner
     private lateinit var serviceButton: Button
     private lateinit var notificationButton: Button
+    private lateinit var backgroundButton: Button
     private lateinit var pairingButton: Button
     private var smsPackages: List<SmsApp> = emptyList()
     private var loadingSmsSelection = true
@@ -105,7 +105,24 @@ class MainActivity : Activity() {
 
         root.addView(text("验证码传递", 28f, TEXT, true))
         root.addView(text("手机收到验证码后，传到电脑浏览器填写。", 14f, MUTED)
-            .withMargins(top = 4, bottom = 14))
+            .withMargins(top = 4, bottom = 10))
+
+        serviceButton = primaryButton("开始传递") { toggleService() }
+            .also(root::addView)
+
+        root.addView(text("设置步骤", 12f, MUTED, true).withMargins(top = 12, bottom = 3))
+        notificationButton = secondaryButton("通知读取设置") {
+            if (coordinator.hasNotificationAccess()) {
+                openNotificationAccessSettings()
+            } else {
+                showNotificationAccessGuideIfNeeded(force = true)
+            }
+        }.also(root::addView)
+        backgroundButton = secondaryButton("防止后台断开") {
+            showBackgroundReliabilityGuide()
+        }.withMargins(top = 4).also(root::addView)
+        pairingButton = secondaryButton("配对电脑") { handlePairingAction() }
+            .withMargins(top = 4, bottom = 10).also(root::addView)
 
         listenerWarningCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -121,9 +138,6 @@ class MainActivity : Activity() {
             listenerRepairButton = button("立即重新连接", PRIMARY, Color.WHITE) {
                 handleNotificationAccessAction()
             }.withMargins(top = 9).also(::addView)
-            listenerSettingsButton = button("仍未恢复？打开系统设置", WARNING_BACKGROUND, PRIMARY) {
-                openRecoverySettings()
-            }.apply { visibility = View.GONE }.also(::addView)
         }.withMargins(bottom = 10).also(root::addView)
 
         val mainCard = card()
@@ -178,25 +192,6 @@ class MainActivity : Activity() {
             .also(mainCard::addView)
         root.addView(mainCard, matchWrap())
 
-        serviceButton = primaryButton("开始传递") { toggleService() }.withMargins(top = 12)
-            .also(root::addView)
-
-        val firstActions = horizontalRow()
-        notificationButton = secondaryButton("第一步：开启通知读取") {
-            if (!coordinator.hasNotificationAccess()) {
-                showNotificationAccessGuideIfNeeded(force = true)
-            } else if (!OtpNotificationListener.isConnected) {
-                requestImmediateNotificationReconnect()
-            } else if (isXiaomiDevice()) {
-                showBackgroundReliabilityGuide()
-            } else {
-                openNotificationAccessSettings()
-            }
-        }.also { firstActions.addView(it, weightedButtonParams()) }
-        pairingButton = secondaryButton("生成新配对码") { handlePairingAction() }
-            .also { firstActions.addView(it, weightedButtonParams(left = 8)) }
-        root.addView(firstActions, matchWrap().apply { topMargin = dp(8) })
-
         plainButton("发送测试验证码（可选）") {
             val ok = coordinator.sendSyntheticNotification()
             val listenerConnected = coordinator.snapshot().notificationListenerConnected
@@ -213,12 +208,12 @@ class MainActivity : Activity() {
 
         val guide = card().withMargins(top = 14)
         guide.addView(text("首次使用流程", 16f, TEXT, true))
-        guide.addView(text("1  开启通知读取，确认状态显示“已连接”", 13f, TEXT).withMargins(top = 10))
-        guide.addView(text("2  点击“开始传递”，查看 Wi-Fi 地址和配对码", 13f, TEXT).withMargins(top = 7))
-        guide.addView(text("3  在电脑浏览器安装“验证码传递”插件", 13f, TEXT).withMargins(top = 7))
-        guide.addView(text("4  在插件中分别填写地址、端口和配对码", 13f, TEXT).withMargins(top = 7))
-        guide.addView(text("5  浏览器询问访问本地网络设备时，点击“允许”", 13f, TEXT).withMargins(top = 7))
-        guide.addView(text("6  网页输入手机号后，用插件等待并写入验证码", 13f, TEXT).withMargins(top = 7))
+        guide.addView(text("1  点“通知读取设置”，开启通知读取", 13f, TEXT).withMargins(top = 10))
+        guide.addView(text("2  点“防止后台断开”，允许自启动", 13f, TEXT).withMargins(top = 7))
+        guide.addView(text("3  选择短信应用，点“开始传递”", 13f, TEXT).withMargins(top = 7))
+        guide.addView(text("4  点“配对电脑”，按插件提示填写信息", 13f, TEXT).withMargins(top = 7))
+        guide.addView(text("5  浏览器询问访问本地网络时，点“允许”", 13f, TEXT).withMargins(top = 7))
+        guide.addView(text("6  网页输入手机号，用插件填充并等待", 13f, TEXT).withMargins(top = 7))
         root.addView(guide)
 
         detailStatus = text("", 12f, MUTED).withMargins(top = 14).also(root::addView)
@@ -334,23 +329,13 @@ class MainActivity : Activity() {
                 "通常会在一分钟内恢复，不需要关闭权限，也不用让 App 保持在前台。"
             }
             listenerRepairButton.text = "立即重新连接"
-            listenerSettingsButton.text = if (isXiaomiDevice()) "允许后台自启动" else "仍未恢复？打开系统设置"
-            listenerSettingsButton.visibility = if (recoveryTakingLong) View.VISIBLE else View.GONE
         } else {
             listenerWarningTitle.text = "请先开启通知读取，否则无法接收短信"
             listenerWarningHelp.text = "点击下方按钮，在系统页面打开“验证码传递 · 通知读取”，然后返回本页。"
             listenerRepairButton.text = "立即开启通知读取"
-            listenerSettingsButton.visibility = View.GONE
-        }
-        notificationButton.text = when {
-            !notificationGranted -> "开启通知读取"
-            !snapshot.notificationListenerConnected -> "修复通知读取"
-            isXiaomiDevice() -> "防止后台断开"
-            else -> "管理通知读取"
         }
         serviceButton.text = if (snapshot.enabled) "停止传递" else "开始传递"
         serviceButton.isEnabled = snapshot.enabled || notificationGranted
-        pairingButton.text = if (snapshot.paired) "更换配对电脑" else "生成新配对码"
         pairingButton.isEnabled = snapshot.enabled
         detailStatus.text = snapshot.diagnostic
         recentStatus.text = snapshot.lastCode?.let { code ->
@@ -375,25 +360,32 @@ class MainActivity : Activity() {
     private fun showBackgroundReliabilityGuide() {
         AlertDialog.Builder(this)
             .setTitle("防止后台断开")
-            .setMessage("澎湃 OS 默认可能禁止 App 在重启、升级或被系统回收后重新启动。\n\n进入下一页，找到“验证码传递”并允许自启动。设置一次即可，之后不需要把 App 一直放在前台。")
+            .setMessage(if (isXiaomiDevice()) {
+                "进入下一页，找到“验证码传递”并允许自启动。设置一次即可，不需要把 App 一直放在前台。"
+            } else {
+                "进入应用设置，允许后台运行；如果仍会断开，再将电池用量设为“不限制”。"
+            })
             .setNegativeButton("稍后", null)
-            .setNeutralButton("通知读取设置") { _, _ -> openNotificationAccessSettings() }
-            .setPositiveButton("去设置") { _, _ -> openBackgroundAutostartSettings() }
+            .setPositiveButton("去设置") { _, _ -> openBackgroundReliabilitySettings() }
             .show()
     }
 
-    private fun openRecoverySettings() {
-        if (isXiaomiDevice()) showBackgroundReliabilityGuide() else openNotificationAccessSettings()
-    }
-
-    private fun openBackgroundAutostartSettings() {
+    private fun openBackgroundReliabilitySettings() {
+        if (isXiaomiDevice()) {
+            try {
+                startActivity(Intent("miui.intent.action.OP_AUTO_START").addCategory(Intent.CATEGORY_DEFAULT))
+                return
+            } catch (_: Exception) {
+                // Fall through to the standard application settings page.
+            }
+        }
         try {
-            startActivity(Intent("miui.intent.action.OP_AUTO_START").addCategory(Intent.CATEGORY_DEFAULT))
-        } catch (_: Exception) {
             startActivity(
                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
                     .setData(Uri.parse("package:$packageName"))
             )
+        } catch (_: Exception) {
+            startActivity(Intent(Settings.ACTION_SETTINGS))
         }
     }
 
@@ -503,11 +495,6 @@ class MainActivity : Activity() {
         elevation = dp(1).toFloat()
     }
 
-    private fun horizontalRow(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER
-    }
-
     private fun primaryButton(label: String, action: () -> Unit): Button = button(label, PRIMARY, Color.WHITE, action).apply {
         minHeight = dp(50)
     }
@@ -540,12 +527,6 @@ class MainActivity : Activity() {
         cornerRadius = dp(radiusDp).toFloat()
         if (stroke != null) setStroke(dp(1), stroke)
     }
-
-    private fun weightedButtonParams(left: Int = 0) = LinearLayout.LayoutParams(
-        0,
-        LinearLayout.LayoutParams.WRAP_CONTENT,
-        1f
-    ).apply { leftMargin = dp(left) }
 
     private fun matchWrap() = LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.MATCH_PARENT,
