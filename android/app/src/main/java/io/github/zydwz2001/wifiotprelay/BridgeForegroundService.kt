@@ -21,10 +21,24 @@ class BridgeForegroundService : Service() {
     private val coordinator get() = (application as BridgeApplication).coordinator
     private val handler = Handler(Looper.getMainLooper())
     private var callbackRegistered = false
+    private var notificationRecoveryAttempts = 0
     private val notificationListenerRecovery = object : Runnable {
         override fun run() {
-            if (coordinator.config.bridgeEnabled && coordinator.hasNotificationAccess() && !OtpNotificationListener.isConnected) {
-                OtpNotificationListener.requestReconnect(this@BridgeForegroundService)
+            when (notificationRecoveryAction(
+                bridgeEnabled = coordinator.config.bridgeEnabled,
+                accessGranted = coordinator.hasNotificationAccess(),
+                listenerConnected = OtpNotificationListener.isConnected,
+                previousAttempts = notificationRecoveryAttempts
+            )) {
+                NotificationRecoveryAction.NONE -> notificationRecoveryAttempts = 0
+                NotificationRecoveryAction.REQUEST_REBIND -> {
+                    notificationRecoveryAttempts++
+                    OtpNotificationListener.requestReconnect(this@BridgeForegroundService)
+                }
+                NotificationRecoveryAction.FORCE_REBIND -> {
+                    notificationRecoveryAttempts++
+                    OtpNotificationListener.requestReconnect(this@BridgeForegroundService, force = true)
+                }
             }
             handler.postDelayed(this, NOTIFICATION_LISTENER_RETRY_MS)
         }
@@ -132,7 +146,7 @@ class BridgeForegroundService : Service() {
         const val ACTION_STOP = "io.github.zydwz2001.wifiotprelay.action.STOP"
         private const val CHANNEL_ID = "wifi_relay_status"
         private const val NOTIFICATION_ID = 5201
-        private const val NOTIFICATION_LISTENER_RETRY_MS = 30_000L
+        private const val NOTIFICATION_LISTENER_RETRY_MS = 15_000L
         private val NETWORK_REFRESH_TOKEN = Any()
     }
 }

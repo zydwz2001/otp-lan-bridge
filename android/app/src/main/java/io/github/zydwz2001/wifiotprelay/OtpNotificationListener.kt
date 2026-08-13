@@ -3,7 +3,11 @@ package io.github.zydwz2001.wifiotprelay
 import android.app.Notification
 import android.content.ComponentName
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.view.View
@@ -16,7 +20,9 @@ class OtpNotificationListener : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        activeInstance = this
         isConnected = true
+        disconnectedSinceElapsedRealtime = 0L
         coordinator.onNotificationAccessMayHaveChanged()
         try {
             activeNotifications.orEmpty().forEach(::onNotificationPosted)
@@ -26,14 +32,15 @@ class OtpNotificationListener : NotificationListenerService() {
     }
 
     override fun onListenerDisconnected() {
-        isConnected = false
-        coordinator.onNotificationAccessMayHaveChanged()
-        requestRebind(ComponentName(this, OtpNotificationListener::class.java))
+        if (markDisconnected(this)) {
+            coordinator.onNotificationAccessMayHaveChanged()
+            requestReconnect(this)
+        }
         super.onListenerDisconnected()
     }
 
     override fun onDestroy() {
-        isConnected = false
+        markDisconnected(this)
         super.onDestroy()
     }
 
@@ -124,8 +131,55 @@ class OtpNotificationListener : NotificationListenerService() {
         var isConnected: Boolean = false
             private set
 
-        fun requestReconnect(context: Context) {
-            requestRebind(ComponentName(context, OtpNotificationListener::class.java))
+        @Volatile
+        private var activeInstance: OtpNotificationListener? = null
+
+        @Volatile
+        private var disconnectedSinceElapsedRealtime: Long = SystemClock.elapsedRealtime()
+
+        @Volatile
+        private var lastForcedReconnectAt: Long = 0L
+
+        fun disconnectedForMs(now: Long = SystemClock.elapsedRealtime()): Long =
+            if (isConnected) 0L else (now - disconnectedSinceElapsedRealtime).coerceAtLeast(0L)
+
+        fun requestReconnect(context: Context, force: Boolean = false) {
+            val component = ComponentName(context, OtpNotificationListener::class.java)
+            val now = SystemClock.elapsedRealtime()
+            if (force && Build.VERSION.SDK_INT >= 34 &&
+                (lastForcedReconnectAt == 0L || now - lastForcedReconnectAt >= FORCE_RECONNECT_COOLDOWN_MS)
+            ) {
+                lastForcedReconnectAt = now
+                try {
+                    // Android 14+ can recycle a stale listener binding without
+                    // asking the user to switch notification access off and on.
+                    NotificationListenerService.requestUnbind(component)
+                    Handler(Looper.getMainLooper()).postDelayed(
+                        { NotificationListenerService.requestRebind(component) },
+                        FORCE_REBIND_DELAY_MS
+                    )
+                    return
+                } catch (_: Exception) {
+                    // Fall back to the regular host-managed rebind request.
+                }
+            }
+            NotificationListenerService.requestRebind(component)
         }
+
+        @Synchronized
+        private fun markDisconnected(instance: OtpNotificationListener): Boolean {
+            // A delayed onDestroy from an old binding must not overwrite the
+            // state of a newer listener instance that is already connected.
+            if (activeInstance != null && activeInstance !== instance) return false
+            activeInstance = null
+            isConnected = false
+            if (disconnectedSinceElapsedRealtime == 0L) {
+                disconnectedSinceElapsedRealtime = SystemClock.elapsedRealtime()
+            }
+            return true
+        }
+
+        private const val FORCE_REBIND_DELAY_MS = 750L
+        private const val FORCE_RECONNECT_COOLDOWN_MS = 45_000L
     }
 }

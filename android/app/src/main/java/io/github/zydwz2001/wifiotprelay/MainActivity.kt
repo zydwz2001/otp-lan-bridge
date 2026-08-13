@@ -43,6 +43,7 @@ class MainActivity : Activity() {
     private lateinit var listenerWarningTitle: TextView
     private lateinit var listenerWarningHelp: TextView
     private lateinit var listenerRepairButton: Button
+    private lateinit var listenerSettingsButton: Button
     private lateinit var addressStatus: TextView
     private lateinit var portStatus: TextView
     private lateinit var pairCodeStatus: TextView
@@ -113,13 +114,16 @@ class MainActivity : Activity() {
             listenerWarningTitle = text("通知读取未连接，真实短信无法传递", 15f, ERROR, true)
                 .also(::addView)
             listenerWarningHelp = text(
-                "在系统页面先关闭再重新开启“验证码传递 · 通知读取”，然后返回本页等待几秒。",
+                "系统正在自动重新连接，不需要关闭权限，也不用让 App 保持在前台。",
                 12f,
                 TEXT
             ).withMargins(top = 5).also(::addView)
-            listenerRepairButton = button("立即修复通知读取", PRIMARY, Color.WHITE) {
-                openNotificationAccessSettings()
+            listenerRepairButton = button("立即重新连接", PRIMARY, Color.WHITE) {
+                handleNotificationAccessAction()
             }.withMargins(top = 9).also(::addView)
+            listenerSettingsButton = button("仍未恢复？打开系统设置", WARNING_BACKGROUND, PRIMARY) {
+                openRecoverySettings()
+            }.apply { visibility = View.GONE }.also(::addView)
         }.withMargins(bottom = 10).also(root::addView)
 
         val mainCard = card()
@@ -179,10 +183,14 @@ class MainActivity : Activity() {
 
         val firstActions = horizontalRow()
         notificationButton = secondaryButton("第一步：开启通知读取") {
-            if (coordinator.hasNotificationAccess()) {
-                openNotificationAccessSettings()
-            } else {
+            if (!coordinator.hasNotificationAccess()) {
                 showNotificationAccessGuideIfNeeded(force = true)
+            } else if (!OtpNotificationListener.isConnected) {
+                requestImmediateNotificationReconnect()
+            } else if (isXiaomiDevice()) {
+                showBackgroundReliabilityGuide()
+            } else {
+                openNotificationAccessSettings()
             }
         }.also { firstActions.addView(it, weightedButtonParams()) }
         pairingButton = secondaryButton("生成新配对码") { handlePairingAction() }
@@ -283,13 +291,14 @@ class MainActivity : Activity() {
         val notificationGranted = coordinator.hasNotificationAccess()
         serviceStatus.text = when {
             snapshot.enabled && !notificationGranted -> "⚠  请开启通知读取"
-            snapshot.enabled && !snapshot.notificationListenerConnected -> "⚠  通知读取未连接"
+            snapshot.enabled && !snapshot.notificationListenerConnected -> "正在自动恢复通知读取"
             snapshot.running -> "●  正在传递"
             snapshot.enabled -> "正在恢复连接"
             else -> "尚未开始"
         }
         serviceStatus.setTextColor(when {
-            snapshot.enabled && (!notificationGranted || !snapshot.notificationListenerConnected) -> ERROR
+            snapshot.enabled && !notificationGranted -> ERROR
+            snapshot.enabled && !snapshot.notificationListenerConnected -> PRIMARY
             snapshot.running -> SUCCESS
             else -> MUTED
         })
@@ -308,22 +317,35 @@ class MainActivity : Activity() {
         }
         notificationStatus.text = when {
             !notificationGranted -> "通知读取：未开启，无法接收短信"
-            snapshot.notificationListenerConnected -> "通知读取：已连接，可以接收短信"
-            else -> "通知读取：未连接，真实短信无法传递"
+            snapshot.notificationListenerConnected -> "通知读取：已连接，可退出本页面"
+            else -> "通知读取：正在自动重新连接"
         }
         listenerWarningCard.visibility = if (notificationGranted && snapshot.notificationListenerConnected) View.GONE else View.VISIBLE
         if (notificationGranted) {
-            listenerWarningTitle.text = "通知读取未连接，真实短信无法传递"
-            listenerWarningHelp.text = "点击下方按钮，在系统页面先关闭再重新开启“验证码传递 · 通知读取”，然后返回本页等待几秒。"
-            listenerRepairButton.text = "立即修复通知读取"
+            val recoveryTakingLong = OtpNotificationListener.disconnectedForMs() >= LISTENER_LONG_RECOVERY_MS
+            listenerWarningTitle.text = if (recoveryTakingLong) "通知读取仍未连接" else "正在自动恢复通知读取"
+            listenerWarningHelp.text = if (recoveryTakingLong) {
+                if (isXiaomiDevice()) {
+                    "澎湃 OS 可能拦截了后台连接。请先点“立即重新连接”，并允许本 App 后台自启动。"
+                } else {
+                    "已自动重试。请先点“立即重新连接”；若仍不恢复，再打开系统设置检查权限。"
+                }
+            } else {
+                "通常会在一分钟内恢复，不需要关闭权限，也不用让 App 保持在前台。"
+            }
+            listenerRepairButton.text = "立即重新连接"
+            listenerSettingsButton.text = if (isXiaomiDevice()) "允许后台自启动" else "仍未恢复？打开系统设置"
+            listenerSettingsButton.visibility = if (recoveryTakingLong) View.VISIBLE else View.GONE
         } else {
             listenerWarningTitle.text = "请先开启通知读取，否则无法接收短信"
             listenerWarningHelp.text = "点击下方按钮，在系统页面打开“验证码传递 · 通知读取”，然后返回本页。"
             listenerRepairButton.text = "立即开启通知读取"
+            listenerSettingsButton.visibility = View.GONE
         }
         notificationButton.text = when {
             !notificationGranted -> "开启通知读取"
             !snapshot.notificationListenerConnected -> "修复通知读取"
+            isXiaomiDevice() -> "防止后台断开"
             else -> "管理通知读取"
         }
         serviceButton.text = if (snapshot.enabled) "停止传递" else "开始传递"
@@ -335,6 +357,51 @@ class MainActivity : Activity() {
             "最近验证码：$code  ${DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(snapshot.lastCodeAt ?: 0))}"
         } ?: "最近验证码：暂无"
     }
+
+    private fun handleNotificationAccessAction() {
+        if (!coordinator.hasNotificationAccess()) {
+            openNotificationAccessSettings()
+            return
+        }
+        requestImmediateNotificationReconnect()
+    }
+
+    private fun requestImmediateNotificationReconnect() {
+        OtpNotificationListener.requestReconnect(this, force = true)
+        Toast.makeText(this, "正在重新连接通知读取，不需要修改权限", Toast.LENGTH_SHORT).show()
+        handler.postDelayed(::renderState, 1_500)
+    }
+
+    private fun showBackgroundReliabilityGuide() {
+        AlertDialog.Builder(this)
+            .setTitle("防止后台断开")
+            .setMessage("澎湃 OS 默认可能禁止 App 在重启、升级或被系统回收后重新启动。\n\n进入下一页，找到“验证码传递”并允许自启动。设置一次即可，之后不需要把 App 一直放在前台。")
+            .setNegativeButton("稍后", null)
+            .setNeutralButton("通知读取设置") { _, _ -> openNotificationAccessSettings() }
+            .setPositiveButton("去设置") { _, _ -> openBackgroundAutostartSettings() }
+            .show()
+    }
+
+    private fun openRecoverySettings() {
+        if (isXiaomiDevice()) showBackgroundReliabilityGuide() else openNotificationAccessSettings()
+    }
+
+    private fun openBackgroundAutostartSettings() {
+        try {
+            startActivity(Intent("miui.intent.action.OP_AUTO_START").addCategory(Intent.CATEGORY_DEFAULT))
+        } catch (_: Exception) {
+            startActivity(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.parse("package:$packageName"))
+            )
+        }
+    }
+
+    private fun isXiaomiDevice(): Boolean =
+        Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true) ||
+            Build.BRAND.equals("Xiaomi", ignoreCase = true) ||
+            Build.BRAND.equals("Redmi", ignoreCase = true) ||
+            Build.BRAND.equals("POCO", ignoreCase = true)
 
     private fun loadSmsPackages() {
         val found = linkedMapOf<String, SmsApp>()
@@ -501,6 +568,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQUEST_NOTIFICATIONS = 10
+        private const val LISTENER_LONG_RECOVERY_MS = 90_000L
         private val BACKGROUND = Color.rgb(246, 248, 251)
         private val TEXT = Color.rgb(26, 35, 49)
         private val MUTED = Color.rgb(102, 112, 133)
