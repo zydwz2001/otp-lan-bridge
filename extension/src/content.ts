@@ -33,6 +33,7 @@ chrome.runtime.onMessage.addListener((message: Record<string, unknown>, _sender,
   }
   if (message.type === "UI_STATE" && window.top === window && panel) {
     panel.update(message.state as PanelState);
+    panel.updateAddress(message.address as { host?: string; port?: number } | undefined);
   }
   if (message.type === "POLICY_DISABLED") {
     enabled = false;
@@ -183,6 +184,16 @@ class BridgePanel {
     if (!this.settingsOpen || next.error) this.showFeedback(next.error ?? "", true);
     this.renderMain();
     if (next.waitState === "CODE_READY" && this.previousWaitState !== "CODE_READY" && this.soundEnabled) playTone();
+  }
+
+  updateAddress(address?: { host?: string; port?: number }): void {
+    if (!this.settingsOpen || !this.settingsConfig || !address) return;
+    const host = String(address.host ?? "");
+    const port = Number(address.port);
+    if (!host || !Number.isInteger(port) || (host === this.settingsConfig.host && port === this.settingsConfig.port)) return;
+    this.settingsConfig = { ...this.settingsConfig, host, port };
+    this.renderSettings();
+    this.showFeedback(`已自动找到手机新地址 ${host}`);
   }
 
   private renderMain(): void {
