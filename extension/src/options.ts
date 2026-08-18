@@ -65,6 +65,16 @@ saveButton.addEventListener("click", () => runBusy(saveButton, () => save(true))
 
 chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
   if (message.type === "OPTIONS_STATE") renderState(message.state as BridgeRuntimeState);
+  if (message.type === "OPTIONS_STATE" && message.address) {
+    const address = message.address as { host?: string; port?: number };
+    const host = String(address.host ?? "");
+    const port = Number(address.port);
+    if (host && Number.isInteger(port) && (hostInput.value !== host || Number(portInput.value) !== port)) {
+      hostInput.value = host;
+      portInput.value = String(port);
+      showFeedback(`已自动找到手机新地址 ${host}`);
+    }
+  }
 });
 
 async function load(): Promise<void> {

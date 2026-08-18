@@ -10,6 +10,7 @@ import {
   randomBase64,
   verifyHmac
 } from "./crypto";
+import { findVerifiedCandidate, sameSubnetCandidates } from "./discovery";
 import {
   DEFAULT_CONFIG,
   DEFAULT_RUNTIME_STATE,
@@ -29,6 +30,13 @@ const ARM_TTL_MS = 5 * 60 * 1000;
 const CODE_TTL_MS = 2 * 60 * 1000;
 const CLOCK_TOLERANCE_MS = 2 * 60 * 1000;
 const LOCAL_NETWORK_PROBE_TTL_MS = 45 * 1000;
+const ADDRESS_DISCOVERY_INTERVAL_MS = 5 * 60 * 1000;
+const BRIDGE_CONNECT_TIMEOUT_MS = 8_000;
+const NEARBY_ADDRESS_COUNT = 16;
+const NEARBY_ADDRESS_PROBE_TIMEOUT_MS = 5_000;
+const NEARBY_ADDRESS_PROBE_CONCURRENCY = 2;
+const BROAD_ADDRESS_PROBE_TIMEOUT_MS = 2_500;
+const BROAD_ADDRESS_PROBE_CONCURRENCY = 4;
 
 interface LocalNetworkProbePermit {
   host: string;
@@ -52,6 +60,9 @@ let clientNonce = "";
 let reconnectDelay = 1_000;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+let connectionTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+let addressDiscovery: Promise<void> | null = null;
+let lastAddressDiscoveryAt = 0;
 let sendQueue: Promise<void> = Promise.resolve();
 const focusedTargets = new Map<number, FocusTarget>();
 const localNetworkProbePermits = new Map<string, LocalNetworkProbePermit>();
@@ -463,6 +474,18 @@ function connectBridge(): void {
     return;
   }
 
+  connectionTimeoutTimer = setTimeout(() => {
+    if (generation !== socketGeneration || !socket || socket.readyState === WebSocket.OPEN) return;
+    const timedOutSocket = socket;
+    socket = null;
+    timedOutSocket.onopen = null;
+    timedOutSocket.onmessage = null;
+    timedOutSocket.onerror = null;
+    timedOutSocket.onclose = null;
+    try { timedOutSocket.close(); } catch { /* already closed */ }
+    handleDisconnect(generation, "旧地址连接超时，正在查找已配对手机");
+  }, BRIDGE_CONNECT_TIMEOUT_MS);
+
   socket.onopen = () => {
     if (generation !== socketGeneration || !socket) return;
     clientNonce = randomBase64(16);
@@ -492,8 +515,10 @@ function disconnectBridge(incrementGeneration = true): void {
   if (incrementGeneration) socketGeneration += 1;
   if (reconnectTimer) clearTimeout(reconnectTimer);
   if (heartbeatTimer) clearInterval(heartbeatTimer);
+  if (connectionTimeoutTimer) clearTimeout(connectionTimeoutTimer);
   reconnectTimer = undefined;
   heartbeatTimer = undefined;
+  connectionTimeoutTimer = undefined;
   const current = socket;
   socket = null;
   current?.close(1000, "reconnect");
@@ -506,6 +531,8 @@ function disconnectBridge(incrementGeneration = true): void {
 
 function handleDisconnect(generation: number, message: string): void {
   if (generation !== socketGeneration) return;
+  if (connectionTimeoutTimer) clearTimeout(connectionTimeoutTimer);
+  connectionTimeoutTimer = undefined;
   socket = null;
   sessionKey = null;
   sessionId = "";
@@ -514,8 +541,155 @@ function handleDisconnect(generation: number, message: string): void {
   const waitState = state.waitState === "ARMED" ? "ARMED_OFFLINE" : state.waitState;
   void updateState({ connection: config.pairingKey ? "offline" : "unpaired", waitState, error: message });
   if (!config.pairingKey) return;
+  if (canDiscoverAddress()) {
+    startAddressDiscovery(generation);
+    return;
+  }
+  scheduleReconnect();
+}
+
+function scheduleReconnect(): void {
+  if (reconnectTimer || !config.pairingKey) return;
   reconnectTimer = setTimeout(connectBridge, reconnectDelay);
   reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
+}
+
+function canDiscoverAddress(): boolean {
+  return !addressDiscovery &&
+    Date.now() - lastAddressDiscoveryAt >= ADDRESS_DISCOVERY_INTERVAL_MS &&
+    sameSubnetCandidates(config.host).length > 0;
+}
+
+function startAddressDiscovery(generation: number): void {
+  const staleHost = config.host;
+  const port = config.port;
+  const deviceId = config.deviceId;
+  const clientId = config.clientId;
+  const pairingKey = config.pairingKey;
+  if (!deviceId || !pairingKey) {
+    scheduleReconnect();
+    return;
+  }
+
+  lastAddressDiscoveryAt = Date.now();
+  void updateState({ connection: "offline", error: "旧地址无法连接，正在自动查找已配对手机…" });
+  const run = (async (): Promise<void> => {
+    const key = base64ToBytes(pairingKey);
+    const candidates = sameSubnetCandidates(staleHost);
+    const isUnchanged = (): boolean => generation === socketGeneration &&
+      config.host === staleHost && config.port === port &&
+      config.deviceId === deviceId && config.pairingKey === pairingKey;
+    let found = await findVerifiedCandidate(
+      candidates.slice(0, NEARBY_ADDRESS_COUNT),
+      (candidate, signal) => probePairedPhone(
+        candidate, port, deviceId, clientId, key, NEARBY_ADDRESS_PROBE_TIMEOUT_MS, signal
+      ),
+      NEARBY_ADDRESS_PROBE_CONCURRENCY
+    );
+    if (!found && isUnchanged()) {
+      found = await findVerifiedCandidate(
+        candidates.slice(NEARBY_ADDRESS_COUNT),
+        (candidate, signal) => probePairedPhone(
+          candidate, port, deviceId, clientId, key, BROAD_ADDRESS_PROBE_TIMEOUT_MS, signal
+        ),
+        BROAD_ADDRESS_PROBE_CONCURRENCY
+      );
+    }
+    const unchanged = isUnchanged();
+    if (!unchanged) return;
+
+    if (!found) {
+      await updateState({ connection: "offline", error: "手机未连接；已自动查找同一 Wi-Fi，仍未发现" });
+      scheduleReconnect();
+      return;
+    }
+
+    config.host = found;
+    await saveConfig();
+    reconnectDelay = 1_000;
+    await updateState({ connection: "connecting", error: undefined });
+    connectBridge();
+  })();
+  addressDiscovery = run;
+  void run.finally(() => {
+    if (addressDiscovery === run) addressDiscovery = null;
+  });
+}
+
+function probePairedPhone(
+  host: string,
+  port: number,
+  deviceId: string,
+  clientId: string,
+  pairingKey: Uint8Array,
+  timeoutMs: number,
+  signal: AbortSignal
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let finished = false;
+    let processing = false;
+    let probe: WebSocket | undefined;
+    const clientProbeNonce = randomBase64(16);
+    const finish = (verified: boolean): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", abort);
+      try { probe?.close(1000, "address discovery complete"); } catch { /* already closed */ }
+      resolve(verified);
+    };
+    const abort = (): void => finish(false);
+    const timeout = setTimeout(() => finish(false), timeoutMs);
+    signal.addEventListener("abort", abort, { once: true });
+
+    if (signal.aborted) {
+      finish(false);
+      return;
+    }
+
+    try {
+      probe = new WebSocket(bridgeUrl(host, port));
+    } catch {
+      finish(false);
+      return;
+    }
+    probe.onopen = () => {
+      probe?.send(JSON.stringify({
+        v: 1,
+        type: "AUTH_INIT",
+        deviceId,
+        clientId,
+        clientNonce: clientProbeNonce,
+        timestamp: Date.now()
+      }));
+    };
+    probe.onmessage = (event) => {
+      if (processing || finished) return;
+      processing = true;
+      void (async () => {
+        try {
+          const message = JSON.parse(String(event.data)) as Record<string, unknown>;
+          if (message.type !== "AUTH_CHALLENGE" || message.deviceId !== deviceId) {
+            finish(false);
+            return;
+          }
+          const returnedSessionId = String(message.sessionId ?? "");
+          const serverNonce = String(message.serverNonce ?? "");
+          const proof = String(message.proof ?? "");
+          if (!returnedSessionId || !serverNonce || !proof) {
+            finish(false);
+            return;
+          }
+          const transcript = `${deviceId}|${clientId}|${returnedSessionId}|${clientProbeNonce}|${serverNonce}`;
+          finish(await verifyHmac(pairingKey, transcript, proof));
+        } catch {
+          finish(false);
+        }
+      })();
+    };
+    probe.onerror = () => finish(false);
+    probe.onclose = () => finish(false);
+  });
 }
 
 async function handleSocketMessage(raw: string): Promise<void> {
@@ -551,6 +725,9 @@ async function handleHandshakeMessage(message: Record<string, unknown>): Promise
   incomingSeq = 0;
   outgoingSeq = 0;
   reconnectDelay = 1_000;
+  lastAddressDiscoveryAt = 0;
+  if (connectionTimeoutTimer) clearTimeout(connectionTimeoutTimer);
+  connectionTimeoutTimer = undefined;
   await sendEncrypted("ACK", { kind: "AUTH_OK" });
   await updateState({
     connection: "online",
@@ -731,14 +908,15 @@ function scheduleExactExpiry(): void {
 
 async function broadcastState(): Promise<void> {
   const tabs = await chrome.tabs.query({});
+  const address = { host: config.host, port: config.port };
   await Promise.all(tabs.filter((tab) => tab.id !== undefined).map(async (tab) => {
     try {
-      await chrome.tabs.sendMessage(tab.id!, { type: "UI_STATE", state: panelStateForTab(tab.id!) }, { frameId: 0 });
+      await chrome.tabs.sendMessage(tab.id!, { type: "UI_STATE", state: panelStateForTab(tab.id!), address }, { frameId: 0 });
     } catch {
       // Restricted pages and tabs without the content script are expected.
     }
   }));
-  try { await chrome.runtime.sendMessage({ type: "OPTIONS_STATE", state: panelStateForTab(-1) }); } catch { /* options page is closed */ }
+  try { await chrome.runtime.sendMessage({ type: "OPTIONS_STATE", state: panelStateForTab(-1), address }); } catch { /* options page is closed */ }
 }
 
 async function notifyDisabledTabs(): Promise<void> {
