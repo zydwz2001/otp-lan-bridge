@@ -55,6 +55,7 @@ class MainActivity : Activity() {
     private lateinit var recentStatus: TextView
     private lateinit var smsSpinner: Spinner
     private lateinit var serviceButton: Button
+    private lateinit var restartTransferButton: Button
     private lateinit var transferHint: TextView
     private lateinit var notificationButton: Button
     private lateinit var backgroundButton: Button
@@ -198,6 +199,9 @@ class MainActivity : Activity() {
             .also(startCard::addView)
         serviceButton = primaryButton("开始传递") { toggleService() }
             .withMargins(top = 7).also(startCard::addView)
+        restartTransferButton = secondaryButton("重新启动传递") { restartTransfer() }.apply {
+            visibility = View.GONE
+        }.withMargins(top = 5).also(startCard::addView)
         transferHint = text("请先完成上方配对", 12f, MUTED).withMargins(top = 5)
             .also(startCard::addView)
         root.addView(startCard, matchWrap())
@@ -269,6 +273,14 @@ class MainActivity : Activity() {
         handler.postDelayed(::renderState, 300)
     }
 
+    private fun restartTransfer() {
+        startForegroundService(
+            Intent(this, BridgeForegroundService::class.java).setAction(BridgeForegroundService.ACTION_RESTART)
+        )
+        Toast.makeText(this, "正在重新启动传递，无需重新配对", Toast.LENGTH_SHORT).show()
+        handler.postDelayed(::renderState, 500)
+    }
+
     private fun handlePairingAction() {
         val snapshot = coordinator.snapshot()
         if (!snapshot.paired) {
@@ -302,11 +314,15 @@ class MainActivity : Activity() {
         val notificationGranted = coordinator.hasNotificationAccess()
         serviceStatus.text = when {
             snapshot.paired && snapshot.clientOnline -> "●  已配对，浏览器在线"
+            snapshot.paired && snapshot.enabled && snapshot.running -> "●  正在传递，等待电脑连接"
+            snapshot.paired && snapshot.enabled -> "●  正在自动恢复传递"
             snapshot.paired -> "✓  已配对"
             snapshot.running -> "等待电脑配对"
             else -> "尚未配对"
         }
         serviceStatus.setTextColor(when {
+            snapshot.paired && snapshot.clientOnline -> SUCCESS
+            snapshot.paired && snapshot.enabled -> WARNING
             snapshot.paired -> SUCCESS
             snapshot.running -> PRIMARY
             else -> MUTED
@@ -321,7 +337,9 @@ class MainActivity : Activity() {
         pairCodeStatus.letterSpacing = if (snapshot.paired) 0f else .12f
         browserStatus.text = when {
             snapshot.clientOnline -> "浏览器在线"
-            snapshot.paired -> "浏览器离线"
+            snapshot.paired && snapshot.enabled && snapshot.running -> "等待电脑连接"
+            snapshot.paired && snapshot.enabled -> "正在恢复连接"
+            snapshot.paired -> "传递未开始"
             else -> "浏览器未配对"
         }
         notificationStatus.text = when {
@@ -351,13 +369,20 @@ class MainActivity : Activity() {
         applyCompletedIcon(notificationButton, notificationGranted)
         applyCompletedIcon(backgroundButton, isBackgroundReliabilityEnabled())
         serviceButton.text = if (snapshot.enabled) "停止传递" else "开始传递"
+        restartTransferButton.visibility = if (snapshot.enabled && snapshot.paired && !snapshot.clientOnline) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
         pairingButton.text = if (snapshot.paired) "取消配对" else "配对电脑"
         pairingButton.backgroundTintList = ColorStateList.valueOf(if (snapshot.paired) DISABLED_BACKGROUND else Color.WHITE)
         pairingButton.setTextColor(if (snapshot.paired) MUTED else PRIMARY)
         pairingButton.isEnabled = notificationGranted || snapshot.paired
         serviceButton.isEnabled = snapshot.enabled || (notificationGranted && snapshot.paired)
         transferHint.text = when {
-            snapshot.enabled -> "已开始，可退出 App 或锁屏"
+            snapshot.enabled && snapshot.clientOnline -> "已连接，可退出 App 或锁屏"
+            snapshot.enabled && !snapshot.running -> "服务正在自动恢复，也可点“重新启动传递”"
+            snapshot.enabled -> "等待电脑连接；后台会自动恢复，也可点“重新启动传递”"
             !notificationGranted -> "请先完成“通知读取设置”"
             !snapshot.paired -> "请先完成上方配对"
             else -> "准备完成，点击“开始传递”"
@@ -611,6 +636,7 @@ class MainActivity : Activity() {
         private val BORDER = Color.rgb(222, 227, 234)
         private val PRIMARY = Color.rgb(37, 99, 235)
         private val SUCCESS = Color.rgb(5, 150, 105)
+        private val WARNING = Color.rgb(217, 119, 6)
         private val ERROR = Color.rgb(180, 35, 24)
         private val WARNING_BACKGROUND = Color.rgb(255, 247, 237)
         private val WARNING_BORDER = Color.rgb(253, 186, 116)

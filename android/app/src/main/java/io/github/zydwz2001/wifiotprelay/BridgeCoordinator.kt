@@ -77,6 +77,14 @@ class BridgeCoordinator(private val context: Context) {
     }
 
     @Synchronized
+    fun forceRestartServer() {
+        if (!config.bridgeEnabled) return
+        stopServerInternal()
+        diagnostic = "正在重新启动传递"
+        startServer()
+    }
+
+    @Synchronized
     fun unpair() {
         config.clearPairing()
         pairCode = null
