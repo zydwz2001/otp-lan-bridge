@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -22,6 +23,8 @@ class BridgeForegroundService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var callbackRegistered = false
     private var notificationRecoveryAttempts = 0
+    private var browserOfflineSinceAt = 0L
+    private var lastBridgeRecoveryAt = 0L
     private val notificationListenerRecovery = object : Runnable {
         override fun run() {
             when (notificationRecoveryAction(
@@ -48,6 +51,34 @@ class BridgeForegroundService : Service() {
         override fun onAvailable(network: Network) = scheduleNetworkRefresh()
         override fun onLost(network: Network) = scheduleNetworkRefresh()
         override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) = scheduleNetworkRefresh()
+        override fun onLinkPropertiesChanged(network: Network, linkProperties: LinkProperties) = scheduleNetworkRefresh()
+    }
+
+    private val bridgeRecovery = object : Runnable {
+        override fun run() {
+            val now = SystemClock.elapsedRealtime()
+            val snapshot = coordinator.snapshot()
+            if (!snapshot.enabled || snapshot.clientOnline) {
+                browserOfflineSinceAt = 0L
+            } else {
+                if (browserOfflineSinceAt == 0L) browserOfflineSinceAt = now
+                val offlineForMs = now - browserOfflineSinceAt
+                val sinceLastRecoveryMs = if (lastBridgeRecoveryAt == 0L) Long.MAX_VALUE else now - lastBridgeRecoveryAt
+                if (shouldRestartBridge(
+                        bridgeEnabled = snapshot.enabled,
+                        serverRunning = snapshot.running,
+                        clientOnline = snapshot.clientOnline,
+                        offlineForMs = offlineForMs,
+                        sinceLastRecoveryMs = sinceLastRecoveryMs
+                    )
+                ) {
+                    coordinator.forceRestartServer()
+                    lastBridgeRecoveryAt = now
+                    browserOfflineSinceAt = now
+                }
+            }
+            handler.postDelayed(this, BRIDGE_RECOVERY_CHECK_MS)
+        }
     }
 
     override fun onCreate() {
@@ -56,15 +87,26 @@ class BridgeForegroundService : Service() {
         startAsForeground()
         registerNetworkCallback()
         handler.post(notificationListenerRecovery)
+        handler.post(bridgeRecovery)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            coordinator.config.bridgeEnabled = false
-            coordinator.stopServer()
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                coordinator.config.bridgeEnabled = false
+                coordinator.stopServer()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_RESTART -> {
+                coordinator.config.bridgeEnabled = true
+                coordinator.forceRestartServer()
+                browserOfflineSinceAt = SystemClock.elapsedRealtime()
+                lastBridgeRecoveryAt = browserOfflineSinceAt
+                OtpNotificationListener.requestReconnect(this)
+                return START_STICKY
+            }
         }
         coordinator.config.bridgeEnabled = true
         coordinator.startServer()
@@ -97,13 +139,26 @@ class BridgeForegroundService : Service() {
             Intent(this, BridgeForegroundService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val restartIntent = PendingIntent.getService(
+            this,
+            3,
+            Intent(this, BridgeForegroundService::class.java).setAction(ACTION_RESTART),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_wifi_relay)
             .setContentTitle("验证码传递正在运行")
-            .setContentText("等待电脑浏览器连接")
+            .setContentText("等待电脑连接，异常时会自动恢复")
             .setContentIntent(openIntent)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
+            .addAction(
+                Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.stat_notify_sync),
+                    "重新启动传递",
+                    restartIntent
+                ).build()
+            )
             .addAction(
                 Notification.Action.Builder(
                     Icon.createWithResource(this, android.R.drawable.ic_media_pause),
@@ -144,9 +199,11 @@ class BridgeForegroundService : Service() {
     companion object {
         const val ACTION_START = "io.github.zydwz2001.wifiotprelay.action.START"
         const val ACTION_STOP = "io.github.zydwz2001.wifiotprelay.action.STOP"
+        const val ACTION_RESTART = "io.github.zydwz2001.wifiotprelay.action.RESTART"
         private const val CHANNEL_ID = "wifi_relay_status"
         private const val NOTIFICATION_ID = 5201
         private const val NOTIFICATION_LISTENER_RETRY_MS = 15_000L
+        private const val BRIDGE_RECOVERY_CHECK_MS = 30_000L
         private val NETWORK_REFRESH_TOKEN = Any()
     }
 }

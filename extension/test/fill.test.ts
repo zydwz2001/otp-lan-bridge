@@ -105,4 +105,45 @@ describe("fillTarget", () => {
     expect(loginClick).toHaveBeenCalledOnce();
     expect(resendClick).not.toHaveBeenCalled();
   });
+
+  it("submits a unique login action in a dialog without a form", () => {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    const fields = document.createElement("div");
+    const otp = visible(document.createElement("input"));
+    otp.autocomplete = "one-time-code";
+    const resend = visible(document.createElement("button"));
+    resend.type = "button";
+    resend.textContent = "重新发送验证码";
+    fields.append(otp, resend);
+    const login = visible(document.createElement("button"));
+    login.type = "button";
+    login.textContent = "登录/注册";
+    dialog.append(fields, login);
+    document.body.append(dialog);
+
+    const loginClick = vi.fn();
+    const resendClick = vi.fn();
+    login.addEventListener("click", loginClick);
+    resend.addEventListener("click", resendClick);
+
+    expect(submitOtpForm(otp)).toBe(true);
+    expect(loginClick).toHaveBeenCalledOnce();
+    expect(resendClick).not.toHaveBeenCalled();
+  });
+
+  it("does not guess when a container has multiple login actions", () => {
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    const otp = visible(document.createElement("input"));
+    otp.autocomplete = "one-time-code";
+    const first = visible(document.createElement("button"));
+    first.textContent = "登录";
+    const second = visible(document.createElement("button"));
+    second.textContent = "继续登录";
+    dialog.append(otp, first, second);
+    document.body.append(dialog);
+
+    expect(submitOtpForm(otp)).toBe(false);
+  });
 });

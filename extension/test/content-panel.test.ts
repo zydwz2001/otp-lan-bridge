@@ -127,4 +127,30 @@ it("opens phone and pairing settings inside the floating panel", async () => {
   pairedAddress.value = "192.168.18.52";
   pairedAddress.dispatchEvent(new Event("input"));
   expect(saveAddressButton.hidden).toBe(true);
+
+  (shadow!.querySelector(".settings") as HTMLButtonElement).click();
+  const codeExpiresAt = Date.now() + 5 * 60 * 1000;
+  for (const listener of [...runtimeListeners]) {
+    listener({
+      type: "UI_STATE",
+      state: {
+        connection: "online",
+        waitState: "CODE_READY",
+        maskedPhone: "138****8000",
+        code: "483921",
+        codeExpiresAt,
+        waitExpiresAt: codeExpiresAt,
+        sourceAppLabel: "短信"
+      }
+    });
+  }
+  await vi.waitFor(() => expect(shadow!.querySelector(".code")?.textContent).toBe("483921"));
+  const backToFill = [...shadow!.querySelectorAll("button")].find((button) => button.textContent === "返回填充")!;
+  backToFill.click();
+  expect(shadow!.querySelector(".code")).toBeNull();
+  expect([...shadow!.querySelectorAll("button")].some((button) => button.textContent?.startsWith("查看验证码（"))).toBe(true);
+  expect((shadow!.querySelector("main .primary") as HTMLButtonElement).textContent).toBe("点击手机号输入框，一键填充并等待");
+  const viewCode = [...shadow!.querySelectorAll("button")].find((button) => button.textContent?.startsWith("查看验证码（"))!;
+  viewCode.click();
+  expect(shadow!.querySelector(".code")?.textContent).toBe("483921");
 });

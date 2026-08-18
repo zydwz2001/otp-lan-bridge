@@ -26,7 +26,13 @@ chrome.runtime.onMessage.addListener((message: Record<string, unknown>, _sender,
     const target = purpose === "otp" ? findOtpTarget(document, lastTarget, value) : lastTarget;
     const result = fillTarget(target, value, purpose);
     if (result.ok && purpose === "otp" && target) {
-      window.setTimeout(() => { submitOtpForm(target); }, 120);
+      window.setTimeout(() => {
+        const submitted = submitOtpForm(target);
+        sendResponse(submitted
+          ? { ok: true }
+          : { ok: false, error: "验证码已写入，但未找到明确的登录按钮，请手动点击登录" });
+      }, 180);
+      return true;
     }
     sendResponse(result);
     return false;
@@ -84,6 +90,7 @@ class BridgePanel {
   private readonly soundEnabled: boolean;
   private currentState: PanelState = { connection: "unpaired", waitState: "IDLE", maskedPhone: "未配置" };
   private previousWaitState = "IDLE";
+  private codePageVisible = true;
   private collapsed = false;
   private destroyed = false;
   private settingsOpen = false;
@@ -178,6 +185,8 @@ class BridgePanel {
   update(next: PanelState): void {
     this.previousWaitState = this.currentState.waitState;
     this.currentState = next;
+    if (next.waitState === "CODE_READY" && this.previousWaitState !== "CODE_READY") this.codePageVisible = true;
+    if (next.waitState !== "CODE_READY") this.codePageVisible = true;
     this.statusDot.dataset.state = next.connection;
     this.statusText.textContent = connectionLabel(next.connection, next.notificationAccess);
     this.phoneText.textContent = next.maskedPhone;
@@ -200,11 +209,25 @@ class BridgePanel {
     if (this.destroyed) return;
     const state = this.currentState;
     this.main.replaceChildren();
-    if (state.waitState === "IDLE") {
+    const hasRetainedCode = state.waitState === "CODE_READY" && Boolean(state.code || state.candidates?.length);
+    if (state.waitState === "IDLE" || (hasRetainedCode && !this.codePageVisible)) {
       const phoneConfigured = state.maskedPhone !== "未配置";
       const fillButton = this.actionButton(phoneConfigured ? "点击手机号输入框，一键填充并等待" : "请先展开设置并填写手机号", "primary", "UI_FILL_PHONE");
       fillButton.disabled = !phoneConfigured;
       this.main.append(fillButton);
+      if (hasRetainedCode) {
+        this.main.append(element("p", "hint", "当前验证码仍保留到本次等待结束"));
+        const viewCode = element(
+          "button",
+          "button secondary",
+          `查看验证码（${formatRemaining(state.codeExpiresAt)}）`
+        ) as HTMLButtonElement;
+        viewCode.addEventListener("click", () => {
+          this.codePageVisible = true;
+          this.renderMain();
+        });
+        this.main.append(viewCode);
+      }
       return;
     }
     if (state.waitState === "ARMED" || state.waitState === "ARMED_OFFLINE") {
@@ -224,14 +247,22 @@ class BridgePanel {
       return;
     }
     if (state.candidates?.length && !state.code) {
-      this.main.append(element("p", "eyebrow", "请选择正确的验证码"));
+      this.main.append(
+        element("p", "eyebrow", "请选择正确的验证码"),
+        element("p", "expires", `${formatRemaining(state.codeExpiresAt)} 后结束`)
+      );
       const choices = element("div", "choices");
       for (const candidate of state.candidates) {
         const button = element("button", "choice", candidate) as HTMLButtonElement;
         button.addEventListener("click", () => { void this.action("UI_SELECT_CANDIDATE", { code: candidate }); });
         choices.append(button);
       }
-      this.main.append(choices, this.actionButton("丢弃", "secondary", "UI_DISCARD"));
+      const back = element("button", "button secondary", "返回填充") as HTMLButtonElement;
+      back.addEventListener("click", () => {
+        this.codePageVisible = false;
+        this.renderMain();
+      });
+      this.main.append(choices, back, this.actionButton("丢弃", "secondary", "UI_DISCARD"));
       return;
     }
     if (state.code) {
@@ -242,6 +273,12 @@ class BridgePanel {
         element("p", "expires", `${formatRemaining(state.codeExpiresAt)} 后失效`),
         this.actionButton("写入验证码并登录", "primary", "UI_FILL_OTP")
       );
+      const back = element("button", "button secondary", "返回填充") as HTMLButtonElement;
+      back.addEventListener("click", () => {
+        this.codePageVisible = false;
+        this.renderMain();
+      });
+      this.main.append(back);
       const actions = element("div", "row");
       const copy = element("button", "button secondary", "复制") as HTMLButtonElement;
       copy.addEventListener("click", () => { void this.copyCode(); });

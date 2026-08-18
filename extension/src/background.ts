@@ -27,7 +27,6 @@ const CONFIG_KEY = "wifiRelayConfigV2";
 const STATE_KEY = "wifiRelayRuntimeV2";
 const EXPIRY_ALARM = "wifi-relay-state-expiry";
 const ARM_TTL_MS = 5 * 60 * 1000;
-const CODE_TTL_MS = 2 * 60 * 1000;
 const CLOCK_TOLERANCE_MS = 2 * 60 * 1000;
 const LOCAL_NETWORK_PROBE_TTL_MS = 45 * 1000;
 const ADDRESS_DISCOVERY_INTERVAL_MS = 5 * 60 * 1000;
@@ -213,7 +212,6 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       }
       await fillFocusedTarget(tabId, state.code, "otp");
       await sendCancelIfPossible();
-      await clearWait("IDLE");
       return {};
     }
     case "UI_SELECT_CANDIDATE": {
@@ -780,7 +778,7 @@ async function handleBusinessMessage(type: Envelope["type"], payload: Record<str
     waitState: "CODE_READY",
     code,
     candidates: code ? undefined : candidates,
-    codeExpiresAt: now + CODE_TTL_MS,
+    codeExpiresAt: state.waitExpiresAt,
     messageId,
     receivedAt,
     sourceAppLabel: String(payload.sourceAppLabel ?? "短信").slice(0, 40),
@@ -892,7 +890,7 @@ async function clearWait(nextState: "IDLE" | "EXPIRED", error?: string): Promise
 async function evaluateExpiry(broadcast = true): Promise<void> {
   const now = Date.now();
   if (state.waitState === "CODE_READY" && state.codeExpiresAt && state.codeExpiresAt <= now) {
-    await clearWait("EXPIRED", "验证码已过期，请重新发送");
+    await clearWait("EXPIRED", "本次 5 分钟等待已结束，请重新等待");
   } else if ((state.waitState === "ARMED" || state.waitState === "ARMED_OFFLINE") && state.waitExpiresAt && state.waitExpiresAt <= now) {
     await clearWait("EXPIRED", "等待已超时，请重新等待");
   } else if (broadcast) {

@@ -66,7 +66,7 @@ class BridgeSocketServer(
 
     override fun onStart() {
         scheduler.scheduleWithFixedDelay(::heartbeatTick, 5, 5, TimeUnit.SECONDS)
-        onStateChanged("验证码传递已开始")
+        onStateChanged("验证码传递已开始，等待电脑连接")
     }
 
     override fun onOpen(connection: WebSocket, handshake: ClientHandshake) {
@@ -91,7 +91,7 @@ class BridgeSocketServer(
                 activeArm = null
                 pendingOtp = null
                 deliveredForArm = 0
-                onStateChanged("浏览器已离线")
+                onStateChanged("电脑已断开，后台会自动恢复")
             }
         }
     }

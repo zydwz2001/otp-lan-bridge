@@ -78,8 +78,37 @@ export function submitOtpForm(target: EditableTarget): boolean {
   const form = target instanceof view.HTMLInputElement || target instanceof view.HTMLTextAreaElement
     ? target.form
     : target.closest("form");
-  if (!form) return false;
-  const controls = Array.from(form.querySelectorAll("button, input[type='submit']"))
+  const scopes = submissionScopes(target, form);
+  for (const scope of scopes) {
+    const selected = selectSubmissionControl(scope, view);
+    if (!selected) continue;
+    selected.click();
+    return true;
+  }
+  return false;
+}
+
+function submissionScopes(target: EditableTarget, form: HTMLFormElement | null): ParentNode[] {
+  const scopes: ParentNode[] = [];
+  const seen = new Set<ParentNode>();
+  const add = (scope: ParentNode | null): void => {
+    if (!scope || seen.has(scope)) return;
+    seen.add(scope);
+    scopes.push(scope);
+  };
+
+  add(form);
+  let container: Element | null = target.parentElement;
+  for (let depth = 0; container && depth < 7; depth += 1, container = container.parentElement) add(container);
+  add(target.closest("[role='dialog']"));
+  return scopes;
+}
+
+function selectSubmissionControl(
+  scope: ParentNode,
+  view: Window & typeof globalThis
+): HTMLButtonElement | HTMLInputElement | undefined {
+  const controls = Array.from(scope.querySelectorAll("button, input[type='submit']"))
     .filter((control): control is HTMLButtonElement | HTMLInputElement =>
       (control instanceof view.HTMLButtonElement || control instanceof view.HTMLInputElement) &&
       !control.disabled && control.getClientRects().length > 0
@@ -90,9 +119,7 @@ export function submitOtpForm(target: EditableTarget): boolean {
     ? explicit[0]
     : safeControls.length === 1 && isSubmitControl(safeControls[0]!) ? safeControls[0]
     : undefined;
-  if (!selected) return false;
-  selected.click();
-  return true;
+  return selected;
 }
 
 function otpTargetScore(target: EditableTarget, code: string): number {
