@@ -84,6 +84,15 @@ describe("fillTarget", () => {
     expect(findOtpTarget(document, phone, "483921")).toBe(otp);
   });
 
+  it("finds an OTP input from its nearby label even without special attributes", () => {
+    const row = document.createElement("label");
+    row.append("短信验证码");
+    const otp = visible(document.createElement("input"));
+    row.append(otp);
+    document.body.append(row);
+    expect(findOtpTarget(document, null, "483921")).toBe(otp);
+  });
+
   it("submits only the clear login action in the OTP form", () => {
     const form = document.createElement("form");
     const otp = visible(document.createElement("input"));

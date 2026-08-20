@@ -123,7 +123,10 @@ function selectSubmissionControl(
 }
 
 function otpTargetScore(target: EditableTarget, code: string): number {
-  let score = classifyTarget(target) === "otp" ? 50 : 0;
+  const kind = classifyTarget(target);
+  if (kind === "phone") return -100;
+  let score = kind === "otp" ? 50 : 0;
+  if (/one-time-code|otp|verify|verification|captcha|验证码|校验码|动态码/i.test(nearbyTargetLabel(target))) score += 30;
   if (target.getAttribute("autocomplete")?.toLowerCase() === "one-time-code") score += 80;
   if (target instanceof HTMLInputElement) {
     if (target.maxLength === code.length) score += 35;
@@ -131,6 +134,25 @@ function otpTargetScore(target: EditableTarget, code: string): number {
     if (target.inputMode === "numeric" || target.type === "number" || target.pattern?.includes("d")) score += 8;
   }
   return score;
+}
+
+function nearbyTargetLabel(target: EditableTarget): string {
+  const labels: string[] = [];
+  const id = target.getAttribute("id");
+  if (id) {
+    const label = Array.from(target.ownerDocument.querySelectorAll("label[for]"))
+      .find((candidate) => candidate.getAttribute("for") === id)?.textContent;
+    if (label) labels.push(label);
+  }
+  target.closest("label")?.textContent && labels.push(target.closest("label")!.textContent ?? "");
+  const labelledBy = target.getAttribute("aria-labelledby")?.trim().split(/\s+/).filter(Boolean) ?? [];
+  for (const labelId of labelledBy) {
+    const label = target.ownerDocument.getElementById(labelId)?.textContent;
+    if (label) labels.push(label);
+  }
+  const parentText = target.parentElement?.textContent?.trim();
+  if (parentText && parentText.length <= 120) labels.push(parentText);
+  return labels.join(" ");
 }
 
 function controlLabel(control: HTMLButtonElement | HTMLInputElement): string {

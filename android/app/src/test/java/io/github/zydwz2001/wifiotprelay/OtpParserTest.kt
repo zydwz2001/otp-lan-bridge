@@ -40,6 +40,12 @@ class OtpParserTest {
     }
 
     @Test
+    fun extractsEightDigitOtp() {
+        val result = OtpParser.parse("Your verification code is 72548319. Do not share it.")
+        assertEquals("72548319", (result as OtpParseResult.Match).code)
+    }
+
+    @Test
     fun rejectsHighRiskMessages() {
         assertTrue(OtpParser.parse("银行支付验证码 667788") is OtpParseResult.HighRisk)
     }

@@ -24,15 +24,17 @@ chrome.runtime.onMessage.addListener((message: Record<string, unknown>, _sender,
     const purpose = message.purpose === "phone" ? "phone" : "otp";
     const value = String(message.value ?? "");
     const target = purpose === "otp" ? findOtpTarget(document, lastTarget, value) : lastTarget;
+    if (purpose === "otp" && !target) {
+      sendResponse({ ok: false, error: "当前页面未找到验证码输入框，请确认输入框已经显示" });
+      return false;
+    }
     const result = fillTarget(target, value, purpose);
     if (result.ok && purpose === "otp" && target) {
-      window.setTimeout(() => {
-        const submitted = submitOtpForm(target);
-        sendResponse(submitted
-          ? { ok: true }
-          : { ok: false, error: "验证码已写入，但未找到明确的登录按钮，请手动点击登录" });
-      }, 180);
-      return true;
+      // Reply before clicking login: navigation can destroy this frame and
+      // otherwise make the background believe a successful fill failed.
+      sendResponse({ ok: true, message: "验证码已填入；如果没有自动登录，请手动点击登录" });
+      window.setTimeout(() => { submitOtpForm(target); }, 180);
+      return false;
     }
     sendResponse(result);
     return false;
@@ -506,7 +508,7 @@ class BridgePanel {
         this.showFeedback(String(response?.error ?? "操作失败"), true);
         return null;
       }
-      this.showFeedback("");
+      this.showFeedback(typeof response.message === "string" ? response.message : "");
       return response;
     } catch (error) {
       this.showFeedback(error instanceof Error ? error.message : "扩展后台未响应", true);

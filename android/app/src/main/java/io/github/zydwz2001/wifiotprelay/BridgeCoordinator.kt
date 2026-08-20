@@ -154,6 +154,9 @@ class BridgeCoordinator(private val context: Context) {
                     lastCode = result.code
                     lastCodeAt = payload.postedAt
                     diagnostic = "验证码已发送到浏览器"
+                } else {
+                    activeServer.releaseFingerprint(fingerprint, payload.postedAt)
+                    diagnostic = "验证码发送失败，正在等待通知重试"
                 }
             }
             is OtpParseResult.Ambiguous -> {
@@ -164,7 +167,12 @@ class BridgeCoordinator(private val context: Context) {
                 if (activeServer.deliverOtp(
                         arm, null, result.candidates, result.confidence, payload.postedAt, sourceAppLabel(payload.packageName)
                     )
-                ) diagnostic = "识别到多个候选验证码，等待浏览器确认"
+                ) {
+                    diagnostic = "识别到多个候选验证码，等待浏览器确认"
+                } else {
+                    activeServer.releaseFingerprint(fingerprint, payload.postedAt)
+                    diagnostic = "验证码发送失败，正在等待通知重试"
+                }
             }
         }
     }

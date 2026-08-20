@@ -18,7 +18,7 @@ object OtpParser {
         "订单", "单号", "金额", "人民币", "元", "order", "amount", "cny", "usd", "日期", "时间"
     )
 
-    fun parse(text: String, expectedDigits: Set<Int> = setOf(4, 5, 6), threshold: Double = 0.68): OtpParseResult {
+    fun parse(text: String, expectedDigits: Set<Int> = (4..8).toSet(), threshold: Double = 0.68): OtpParseResult {
         val normalized = text.trim()
         if (normalized.isEmpty()) return OtpParseResult.NoContent
         val lower = normalized.lowercase()

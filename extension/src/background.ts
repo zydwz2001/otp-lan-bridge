@@ -11,6 +11,7 @@ import {
   verifyHmac
 } from "./crypto";
 import { findVerifiedCandidate, sameSubnetCandidates } from "./discovery";
+import { orderedFrameIds } from "./frame-targets";
 import {
   DEFAULT_CONFIG,
   DEFAULT_RUNTIME_STATE,
@@ -36,6 +37,7 @@ const NEARBY_ADDRESS_PROBE_TIMEOUT_MS = 5_000;
 const NEARBY_ADDRESS_PROBE_CONCURRENCY = 2;
 const BROAD_ADDRESS_PROBE_TIMEOUT_MS = 2_500;
 const BROAD_ADDRESS_PROBE_CONCURRENCY = 4;
+const ARM_RETRY_MS = 3_000;
 
 interface LocalNetworkProbePermit {
   host: string;
@@ -60,6 +62,8 @@ let reconnectDelay = 1_000;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
 let connectionTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+let armRetryTimer: ReturnType<typeof setTimeout> | undefined;
+let confirmedArmRequestId = "";
 let addressDiscovery: Promise<void> | null = null;
 let lastAddressDiscoveryAt = 0;
 let sendQueue: Promise<void> = Promise.resolve();
@@ -210,9 +214,8 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       if (state.armedTabId !== tabId || state.waitState !== "CODE_READY" || !state.code || !state.codeExpiresAt || state.codeExpiresAt <= Date.now()) {
         throw new Error("验证码已失效，请重新发送");
       }
-      await fillFocusedTarget(tabId, state.code, "otp");
-      await sendCancelIfPossible();
-      return {};
+      const result = await fillOtpAcrossFrames(tabId, state.code);
+      return { message: result.message };
     }
     case "UI_SELECT_CANDIDATE": {
       const tabId = requireTab(sender);
@@ -517,6 +520,8 @@ function disconnectBridge(incrementGeneration = true): void {
   reconnectTimer = undefined;
   heartbeatTimer = undefined;
   connectionTimeoutTimer = undefined;
+  clearArmRetry();
+  confirmedArmRequestId = "";
   const current = socket;
   socket = null;
   current?.close(1000, "reconnect");
@@ -536,6 +541,8 @@ function handleDisconnect(generation: number, message: string): void {
   sessionId = "";
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   heartbeatTimer = undefined;
+  clearArmRetry();
+  confirmedArmRequestId = "";
   const waitState = state.waitState === "ARMED" ? "ARMED_OFFLINE" : state.waitState;
   void updateState({ connection: config.pairingKey ? "offline" : "unpaired", waitState, error: message });
   if (!config.pairingKey) return;
@@ -735,7 +742,9 @@ async function handleHandshakeMessage(message: Record<string, unknown>): Promise
   heartbeatTimer = setInterval(() => { void sendEncrypted("PING", { at: Date.now() }); }, 20_000);
 
   if ((state.waitState === "ARMED" || state.waitState === "ARMED_OFFLINE") && validArmFromState()) {
+    confirmedArmRequestId = "";
     await sendArmFromState();
+    scheduleArmRetry();
   }
 }
 
@@ -749,6 +758,8 @@ async function handleBusinessMessage(type: Envelope["type"], payload: Record<str
     if (payload.kind === "STATUS") {
       await updateState({ notificationAccess: Boolean(payload.notificationAccess) });
     } else if (payload.kind === "ARMED" && payload.requestId === state.requestId) {
+      confirmedArmRequestId = String(payload.requestId);
+      clearArmRetry();
       await updateState({ waitState: "ARMED", error: undefined });
     }
     return;
@@ -761,8 +772,13 @@ async function handleBusinessMessage(type: Envelope["type"], payload: Record<str
   if (type !== "OTP") return;
 
   const now = Date.now();
+  const messageId = String(payload.messageId ?? "");
+  if (messageId && payload.requestId === state.requestId && state.waitState === "CODE_READY" && messageId === state.messageId) {
+    await sendEncrypted("ACK", { kind: "OTP_RECEIVED", messageId });
+    return;
+  }
   if (!state.requestId || payload.requestId !== state.requestId ||
-      (state.waitState !== "ARMED" && state.waitState !== "ARMED_OFFLINE") ||
+      (state.waitState !== "ARMED" && state.waitState !== "ARMED_OFFLINE" && state.waitState !== "CODE_READY") ||
       !state.waitExpiresAt || now > state.waitExpiresAt + CLOCK_TOLERANCE_MS
   ) return;
   const code = typeof payload.code === "string" && /^\d{4,8}$/.test(payload.code) ? payload.code : undefined;
@@ -771,7 +787,6 @@ async function handleBusinessMessage(type: Envelope["type"], payload: Record<str
     : [];
   if (!code && candidates.length === 0) return;
   const receivedAt = Number(payload.receivedAt);
-  const messageId = String(payload.messageId ?? "");
   if (!Number.isFinite(receivedAt) || !messageId) return;
 
   await updateState({
@@ -785,6 +800,8 @@ async function handleBusinessMessage(type: Envelope["type"], payload: Record<str
     confidence: Number(payload.confidence),
     error: code ? undefined : "识别到多个数字，请确认验证码"
   });
+  confirmedArmRequestId = state.requestId ?? "";
+  clearArmRetry();
   await sendEncrypted("ACK", { kind: "OTP_RECEIVED", messageId });
   scheduleExactExpiry();
 }
@@ -809,7 +826,7 @@ async function beginWait(tabId: number, url: string): Promise<void> {
     requestId: crypto.randomUUID(),
     createdAt: now,
     expiresAt: now + ARM_TTL_MS,
-    expectedDigits: [4, 5, 6],
+    expectedDigits: [4, 5, 6, 7, 8],
     siteLabel: hostnameFromUrl(url).slice(0, 80)
   };
   await updateState({
@@ -827,7 +844,12 @@ async function beginWait(tabId: number, url: string): Promise<void> {
     confidence: undefined,
     error: state.connection === "online" ? undefined : "手机当前离线，连接恢复后继续等待"
   });
-  if (state.connection === "online") await sendEncrypted("ARM", arm);
+  confirmedArmRequestId = "";
+  clearArmRetry();
+  if (state.connection === "online") {
+    await sendEncrypted("ARM", arm);
+    scheduleArmRetry();
+  }
   scheduleExactExpiry();
 }
 
@@ -837,7 +859,7 @@ async function sendArmFromState(): Promise<void> {
     requestId: state.requestId,
     createdAt: state.createdAt,
     expiresAt: state.waitExpiresAt,
-    expectedDigits: [4, 5, 6],
+    expectedDigits: [4, 5, 6, 7, 8],
     siteLabel: "当前网站"
   });
 }
@@ -860,6 +882,55 @@ async function fillFocusedTarget(tabId: number, value: string, purpose: "phone" 
   }
 }
 
+interface FillResponse {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+}
+
+async function fillOtpAcrossFrames(tabId: number, value: string): Promise<FillResponse> {
+  const preferred = focusedTargets.get(tabId);
+  let frames: Array<{ frameId: number }> = [];
+  try {
+    frames = (await chrome.webNavigation.getAllFrames({ tabId }) ?? []).map((frame) => ({ frameId: frame.frameId }));
+  } catch {
+    // The main frame is still available on ordinary pages.
+  }
+
+  let lastError = "";
+  for (const frameId of orderedFrameIds(preferred?.frameId, frames)) {
+    try {
+      const response = await chrome.tabs.sendMessage(
+        tabId,
+        { type: "FILL_VALUE", value, purpose: "otp" },
+        { frameId }
+      ) as FillResponse | undefined;
+      if (response?.ok) return response;
+      if (response?.error) lastError = response.error;
+    } catch {
+      // Sandboxed or freshly navigated frames may not host the content script.
+    }
+  }
+  focusedTargets.delete(tabId);
+  throw new Error(lastError || "当前页面未找到验证码输入框，请确认输入框已经显示");
+}
+
+function clearArmRetry(): void {
+  if (armRetryTimer) clearTimeout(armRetryTimer);
+  armRetryTimer = undefined;
+}
+
+function scheduleArmRetry(): void {
+  clearArmRetry();
+  if (state.connection !== "online" || !validArmFromState() || confirmedArmRequestId === state.requestId ||
+      (state.waitState !== "ARMED" && state.waitState !== "ARMED_OFFLINE")) return;
+  armRetryTimer = setTimeout(() => {
+    armRetryTimer = undefined;
+    if (state.connection !== "online" || !validArmFromState() || confirmedArmRequestId === state.requestId) return;
+    void sendArmFromState().finally(scheduleArmRetry);
+  }, ARM_RETRY_MS);
+}
+
 async function sendCancelIfPossible(): Promise<void> {
   if (state.connection === "online" && state.requestId) await sendEncrypted("CANCEL", { requestId: state.requestId });
 }
@@ -870,6 +941,8 @@ async function cancelWait(reason: string): Promise<void> {
 }
 
 async function clearWait(nextState: "IDLE" | "EXPIRED", error?: string): Promise<void> {
+  clearArmRetry();
+  confirmedArmRequestId = "";
   await updateState({
     waitState: nextState,
     requestId: undefined,

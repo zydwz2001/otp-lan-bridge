@@ -42,7 +42,12 @@ class BridgeSocketServer(
         var lastSentAt = 0L
     }
 
-    private data class PendingOtp(val messageId: String, val expiresAt: Long)
+    private data class PendingOtp(
+        val messageId: String,
+        val payload: JSONObject,
+        val expiresAt: Long,
+        var lastSentAt: Long = 0L
+    )
 
     private val contexts = ConcurrentHashMap<WebSocket, ClientContext>()
     private val scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
@@ -88,9 +93,6 @@ class BridgeSocketServer(
         synchronized(stateLock) {
             if (activeClient == connection) {
                 activeClient = null
-                activeArm = null
-                pendingOtp = null
-                deliveredForArm = 0
                 onStateChanged("电脑已断开，后台会自动恢复")
             }
         }
@@ -144,6 +146,10 @@ class BridgeSocketServer(
         return previous == null || now - previous > DEDUPE_WINDOW_MS
     }
 
+    fun releaseFingerprint(fingerprint: String, markedAt: Long) {
+        recentFingerprints.remove(fingerprint, markedAt)
+    }
+
     fun deliverOtp(
         arm: ArmSession,
         code: String?,
@@ -169,9 +175,14 @@ class BridgeSocketServer(
         if (code != null) payload.put("code", code)
         if (candidates.isNotEmpty()) payload.put("candidates", JSONArray(candidates))
 
-        sendEncrypted(connection, "OTP", payload)
+        val pending = PendingOtp(messageId, payload, arm.expiresAt)
+        pendingOtp = pending
+        if (!sendEncrypted(connection, "OTP", payload)) {
+            pendingOtp = null
+            return false
+        }
+        pending.lastSentAt = System.currentTimeMillis()
         deliveredForArm++
-        pendingOtp = PendingOtp(messageId, System.currentTimeMillis() + OTP_RETENTION_MS)
         true
     }
 
@@ -338,14 +349,18 @@ class BridgeSocketServer(
             val previous = synchronized(stateLock) {
                 val old = activeClient
                 activeClient = connection
-                activeArm = null
-                pendingOtp = null
-                deliveredForArm = 0
+                val now = System.currentTimeMillis()
+                if (activeArm?.expiresAt?.let { it <= now } == true) {
+                    activeArm = null
+                    pendingOtp = null
+                    deliveredForArm = 0
+                }
                 old
             }
             context.stage = Stage.AUTHENTICATED
             if (previous != null && previous != connection) previous.close(1000, "Replaced by a new session")
             sendStatus(connection)
+            retryPendingOtp(connection, force = true)
             onStateChanged("浏览器已连接")
             return
         }
@@ -381,13 +396,16 @@ class BridgeSocketServer(
                 val value = expected.optInt(index)
                 if (value in 4..8) add(value)
             }
-        }.ifEmpty { setOf(4, 5, 6) }
+        }.ifEmpty { (4..8).toSet() }
         val arm = ArmSession(requestId, createdAt, expiresAt, digits, payload.optString("siteLabel").take(80))
         synchronized(stateLock) {
+            val sameRequest = activeArm?.requestId == arm.requestId
             activeClient = connection
             activeArm = arm
-            pendingOtp = null
-            deliveredForArm = 0
+            if (!sameRequest) {
+                pendingOtp = null
+                deliveredForArm = 0
+            }
         }
         sendEncrypted(connection, "ACK", JSONObject().put("kind", "ARMED").put("requestId", requestId))
         onStateChanged("正在等待验证码")
@@ -428,16 +446,38 @@ class BridgeSocketServer(
         )
     }
 
-    private fun sendEncrypted(connection: WebSocket, type: String, payload: JSONObject) {
-        val context = contexts[connection] ?: return
-        val key = context.sessionKey ?: return
-        val deviceId = context.deviceId ?: return
-        val sessionId = context.sessionId ?: return
-        synchronized(context) {
-            val now = System.currentTimeMillis()
-            context.outgoingSeq++
-            connection.send(CryptoBox.encryptEnvelope(type, deviceId, sessionId, context.outgoingSeq, now, payload, key).toString())
-            context.lastSentAt = now
+    private fun sendEncrypted(connection: WebSocket, type: String, payload: JSONObject): Boolean {
+        val context = contexts[connection] ?: return false
+        val key = context.sessionKey ?: return false
+        val deviceId = context.deviceId ?: return false
+        val sessionId = context.sessionId ?: return false
+        return try {
+            synchronized(context) {
+                val now = System.currentTimeMillis()
+                context.outgoingSeq++
+                connection.send(CryptoBox.encryptEnvelope(type, deviceId, sessionId, context.outgoingSeq, now, payload, key).toString())
+                context.lastSentAt = now
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun retryPendingOtp(preferredConnection: WebSocket? = null, force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        val delivery = synchronized(stateLock) {
+            val pending = pendingOtp ?: return
+            val connection = preferredConnection ?: activeClient ?: return
+            if (!connection.isOpen || pending.expiresAt <= now ||
+                (!force && !shouldRetryOtpDelivery(now, pending.expiresAt, pending.lastSentAt))
+            ) return
+            connection to pending
+        }
+        if (sendEncrypted(delivery.first, "OTP", delivery.second.payload)) {
+            synchronized(stateLock) {
+                if (pendingOtp?.messageId == delivery.second.messageId) pendingOtp?.lastSentAt = now
+            }
         }
     }
 
@@ -473,6 +513,7 @@ class BridgeSocketServer(
             }
             if (pendingOtp?.expiresAt?.let { it <= now } == true) pendingOtp = null
         }
+        retryPendingOtp()
         recentFingerprints.entries.removeIf { now - it.value > DEDUPE_WINDOW_MS }
     }
 
@@ -485,7 +526,6 @@ class BridgeSocketServer(
         const val PATH = "/v1/bridge"
         private const val MAX_MESSAGE_SIZE = 32 * 1024
         private const val ARM_MAX_MS = 5 * 60 * 1000L
-        private const val OTP_RETENTION_MS = 2 * 60 * 1000L
         private const val DEDUPE_WINDOW_MS = 60 * 1000L
         private const val CLOCK_TOLERANCE_MS = 2 * 60 * 1000L
         private const val PAIR_LOCK_MS = 5 * 60 * 1000L
