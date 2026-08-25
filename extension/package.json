@@ -1,7 +1,7 @@
 {
   "name": "verification-code-transfer-extension",
   "private": true,
-  "version": "2.2.2",
+  "version": "2.2.3",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",

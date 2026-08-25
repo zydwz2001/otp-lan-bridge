@@ -11,7 +11,6 @@ await build({
   entryPoints: {
     background: resolve(root, "src/background.ts"),
     content: resolve(root, "src/content.ts"),
-    options: resolve(root, "src/options.ts"),
     "pair-permission": resolve(root, "src/pair-permission.ts")
   },
   bundle: true,
@@ -25,8 +24,6 @@ await build({
 
 await Promise.all([
   cp(resolve(root, "src/manifest.json"), resolve(output, "manifest.json")),
-  cp(resolve(root, "src/options.html"), resolve(output, "options.html")),
-  cp(resolve(root, "src/options.css"), resolve(output, "options.css")),
   cp(resolve(root, "src/pair-permission.html"), resolve(output, "pair-permission.html")),
   cp(resolve(root, "src/pair-permission.css"), resolve(output, "pair-permission.css"))
 ]);

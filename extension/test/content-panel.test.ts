@@ -8,6 +8,10 @@ it("opens phone and pairing settings inside the floating panel", async () => {
     return shadow;
   });
   vi.spyOn(window, "setInterval").mockReturnValue(1);
+  vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+    callback(0);
+    return 1;
+  });
 
   const openOptionsPage = vi.fn();
   const runtimeListeners = new Set<(message: Record<string, unknown>) => unknown>();
@@ -20,6 +24,7 @@ it("opens phone and pairing settings inside the floating panel", async () => {
         ok: true,
         allowed: true,
         soundEnabled: true,
+        position: { x: 72, y: 120, collapsed: false },
         state: { connection: "unpaired", waitState: "IDLE", maskedPhone: "未配置" }
       };
     }
@@ -56,6 +61,16 @@ it("opens phone and pairing settings inside the floating panel", async () => {
 
   await import("../src/content");
   await vi.waitFor(() => expect(shadow?.querySelector(".settings")).not.toBeNull());
+  expect((shadow!.host as HTMLElement).style.left).toBe("72px");
+  expect((shadow!.host as HTMLElement).style.top).toBe("120px");
+  const overlappingInput = document.createElement("input");
+  vi.spyOn(overlappingInput, "getBoundingClientRect").mockReturnValue(new DOMRect(72, 120, 100, 30));
+  vi.spyOn(shadow!.host, "getBoundingClientRect").mockReturnValue(new DOMRect(72, 120, 244, 136));
+  document.body.append(overlappingInput);
+  overlappingInput.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+  expect((shadow!.host as HTMLElement).style.left).toBe("72px");
+  expect((shadow!.host as HTMLElement).style.top).toBe("120px");
+  expect((shadow!.host as HTMLElement).style.right).toBe("auto");
   const fillButton = shadow!.querySelector("main .primary") as HTMLButtonElement;
   expect(fillButton.textContent).toBe("请先展开设置并填写手机号");
   expect(fillButton.disabled).toBe(true);
@@ -114,19 +129,28 @@ it("opens phone and pairing settings inside the floating panel", async () => {
     port: 42871,
     pairCode: "123456"
   })));
-  const saveAddressButton = await vi.waitFor(() => {
-    const button = [...shadow!.querySelectorAll("button")].find((item) => item.textContent === "保存新地址并重连");
+  const reconnectButton = await vi.waitFor(() => {
+    const button = [...shadow!.querySelectorAll("button")].find((item) => item.textContent === "重新连接");
     expect(button).not.toBeUndefined();
     return button!;
   });
-  expect(saveAddressButton.hidden).toBe(true);
   const pairedAddress = shadow!.querySelector<HTMLInputElement>('input[inputmode="decimal"]')!;
   pairedAddress.value = "192.168.18.53";
   pairedAddress.dispatchEvent(new Event("input"));
-  expect(saveAddressButton.hidden).toBe(false);
-  pairedAddress.value = "192.168.18.52";
-  pairedAddress.dispatchEvent(new Event("input"));
-  expect(saveAddressButton.hidden).toBe(true);
+  expect(reconnectButton.textContent).toBe("保存新地址并重连");
+  reconnectButton.click();
+  await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({
+    type: "INLINE_SAVE_ADDRESS",
+    host: "192.168.18.53",
+    port: 42871
+  }));
+  const retryButton = await vi.waitFor(() => {
+    const button = [...shadow!.querySelectorAll("button")].find((item) => item.textContent === "重新连接");
+    expect(button).not.toBeUndefined();
+    return button!;
+  });
+  retryButton.click();
+  await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "RECONNECT" }));
 
   (shadow!.querySelector(".settings") as HTMLButtonElement).click();
   const codeExpiresAt = Date.now() + 5 * 60 * 1000;
@@ -153,4 +177,11 @@ it("opens phone and pairing settings inside the floating panel", async () => {
   const viewCode = [...shadow!.querySelectorAll("button")].find((button) => button.textContent?.startsWith("查看验证码（"))!;
   viewCode.click();
   expect(shadow!.querySelector(".code")?.textContent).toBe("483921");
+
+  sendMessage.mockImplementationOnce(() => {
+    throw new Error("Extension context invalidated.");
+  });
+  const staleContextInput = document.createElement("input");
+  document.body.append(staleContextInput);
+  expect(() => staleContextInput.dispatchEvent(new FocusEvent("focusin", { bubbles: true }))).not.toThrow();
 });

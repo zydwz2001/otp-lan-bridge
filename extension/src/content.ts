@@ -75,7 +75,16 @@ function trackFocus(event: FocusEvent): void {
   if (!target) return;
   lastTarget = target;
   if (window.top === window) panel?.avoidTarget(target);
-  void chrome.runtime.sendMessage({ type: "TARGET_FOCUSED", kind: classifyTarget(target), policyUrl }).catch(() => undefined);
+  sendRuntimeMessageQuietly({ type: "TARGET_FOCUSED", kind: classifyTarget(target), policyUrl });
+}
+
+function sendRuntimeMessageQuietly(message: Record<string, unknown>): void {
+  try {
+    void chrome.runtime.sendMessage(message).catch(() => undefined);
+  } catch {
+    // Reloading/updating an unpacked extension invalidates scripts that are
+    // still attached to existing tabs. Those tabs recover after a page reload.
+  }
 }
 
 class BridgePanel {
@@ -100,16 +109,19 @@ class BridgePanel {
   private readonly refreshTimer: number;
   private dragStart: { pointerX: number; pointerY: number; left: number; top: number } | null = null;
   private dragMoved = false;
+  private userPositioned = false;
 
   constructor(position?: PanelPosition, soundEnabled = true) {
     this.soundEnabled = soundEnabled;
     this.host.id = "wifi-otp-relay-host";
     this.host.style.cssText = `all:initial;position:fixed;z-index:2147483647;top:${DEFAULT_TOP}px;right:10px;width:${PANEL_WIDTH}px;color-scheme:light;`;
     if (position) {
-      this.host.style.left = `${position.x}px`;
-      this.host.style.top = `${position.y <= 24 ? DEFAULT_TOP : position.y}px`;
+      const initialWidth = position.collapsed ? COLLAPSED_WIDTH : PANEL_WIDTH;
+      this.host.style.left = `${clamp(position.x, 8, window.innerWidth - initialWidth - 8)}px`;
+      this.host.style.top = `${clamp(position.y, 8, window.innerHeight - 48)}px`;
       this.host.style.right = "auto";
       this.collapsed = position.collapsed;
+      this.userPositioned = true;
     }
     this.shadow.innerHTML = `${styles}
       <section class="panel" role="complementary" aria-label="验证码传递">
@@ -170,7 +182,7 @@ class BridgePanel {
 
   avoidTarget(target: EditableTarget): void {
     window.requestAnimationFrame(() => {
-      if (this.destroyed || this.collapsed || this.settingsOpen) return;
+      if (this.destroyed || this.collapsed || this.settingsOpen || this.userPositioned) return;
       const targetRect = target.getBoundingClientRect();
       const panelRect = this.host.getBoundingClientRect();
       if (!rectsOverlap(targetRect, panelRect, 8)) return;
@@ -180,7 +192,6 @@ class BridgePanel {
       this.host.style.top = `${nextTop}px`;
       this.host.style.right = "10px";
       this.host.style.left = "auto";
-      this.savePosition();
     });
   }
 
@@ -408,24 +419,32 @@ class BridgePanel {
         element("p", "settings-help", "如 Chrome 询问访问本地网络设备，请点击“允许”。")
       );
     } else {
-      const saveAddressButton = element("button", "button primary", "保存新地址并重连") as HTMLButtonElement;
-      const updateSaveAddressButton = (): void => {
-        const changed = host.input.value.trim() !== config.host || Number(port.input.value) !== config.port;
-        saveAddressButton.hidden = !changed;
+      const reconnectButton = element("button", "button primary", "重新连接") as HTMLButtonElement;
+      const addressChanged = (): boolean => (
+        host.input.value.trim() !== config.host || Number(port.input.value) !== config.port
+      );
+      const updateReconnectButton = (): void => {
+        reconnectButton.textContent = addressChanged() ? "保存新地址并重连" : "重新连接";
       };
-      host.input.addEventListener("input", updateSaveAddressButton);
-      port.input.addEventListener("input", updateSaveAddressButton);
-      updateSaveAddressButton();
-      saveAddressButton.addEventListener("click", () => {
-        void this.runBusy(saveAddressButton, "保存中…", async () => {
+      host.input.addEventListener("input", updateReconnectButton);
+      port.input.addEventListener("input", updateReconnectButton);
+      updateReconnectButton();
+      reconnectButton.addEventListener("click", () => {
+        const changed = addressChanged();
+        void this.runBusy(reconnectButton, changed ? "保存中…" : "连接中…", async () => {
           const phoneResponse = await this.action("INLINE_SAVE_PHONE", { phoneNumber: phoneInput.value });
           if (!phoneResponse) return;
-          const response = await this.action("INLINE_SAVE_ADDRESS", {
-            host: host.input.value,
-            port: Number(port.input.value)
-          });
-          if (!response) return;
-          await this.loadSettings("新地址已保存，正在重新连接");
+          if (changed) {
+            const response = await this.action("INLINE_SAVE_ADDRESS", {
+              host: host.input.value,
+              port: Number(port.input.value)
+            });
+            if (!response) return;
+            await this.loadSettings("新地址已保存，正在重新连接");
+          } else {
+            const response = await this.action("RECONNECT");
+            if (response) this.showFeedback("正在重新连接手机");
+          }
         });
       });
       const unpairButton = element("button", "button secondary danger", "更换手机") as HTMLButtonElement;
@@ -447,7 +466,7 @@ class BridgePanel {
           await this.loadSettings("已解除配对");
         });
       });
-      pairingSection.append(saveAddressButton, unpairButton);
+      pairingSection.append(reconnectButton, unpairButton);
     }
 
     this.settingsArea.append(phoneSection, pairingSection);
@@ -585,15 +604,16 @@ class BridgePanel {
     if (!this.dragStart) return;
     this.dragStart = null;
     (event.currentTarget as Element).releasePointerCapture(event.pointerId);
+    if (this.dragMoved) this.userPositioned = true;
     this.savePosition();
   }
 
   private savePosition(): void {
     const rect = this.host.getBoundingClientRect();
-    void chrome.runtime.sendMessage({
+    sendRuntimeMessageQuietly({
       type: "SET_PANEL_POSITION",
       position: { x: rect.left, y: rect.top, collapsed: this.collapsed }
-    }).catch(() => undefined);
+    });
   }
 }
 

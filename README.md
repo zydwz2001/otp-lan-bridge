@@ -3,7 +3,7 @@
 > 手机收到短信验证码后，传到电脑浏览器填写。手机和电脑只需连接同一个 Wi‑Fi。
 
 [![Android 8+](https://img.shields.io/badge/Android-8%2B-3DDC84?logo=android&logoColor=white)](#运行要求)
-[![Chrome 116+](https://img.shields.io/badge/Chrome-116%2B-4285F4?logo=googlechrome&logoColor=white)](#运行要求)
+[![Chrome 120+](https://img.shields.io/badge/Chrome-120%2B-4285F4?logo=googlechrome&logoColor=white)](#运行要求)
 [![CI](https://github.com/zydwz2001/otp-lan-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/zydwz2001/otp-lan-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -11,20 +11,20 @@
 
 ## 这个版本有什么不同
 
-| 项目 | 验证码传递 2.2.2 |
+| 项目 | 验证码传递 2.2.3 |
 | --- | --- |
 | 连接方式 | 只支持手机与电脑所在的同一 Wi‑Fi |
 | VPN / Tailscale | 不需要，也不会创建或启动 VPN |
 | USB / ADB | 不需要，不支持回环转发 |
 | Android 应用 ID | `io.github.zydwz2001.wifiotprelay` |
 | App 监听端口 | App 当前显示的端口（当前版本通常为 `42871`） |
-| 产品界面 | Android App、扩展设置页、网页悬浮面板均为全新设计 |
+| 产品界面 | Android App 与网页悬浮面板均为全新设计 |
 | 协议身份 | 使用独立的 v2 本地存储名称、密钥别名和 HKDF 域分离字符串 |
 
 ## 运行要求
 
 - Android 8.0（API 26）或更高版本。
-- Chrome 116 或更高版本；Chrome 142+ 首次连接时可能询问“访问本地网络”，请选择允许。
+- Chrome 120 或更高版本；Chrome 142+ 首次连接时可能询问“访问本地网络”，请选择允许。
 - 手机与电脑必须连接同一个可互访的 Wi‑Fi。宾馆、学校、公司访客网如果开启了“客户端隔离”，即使 Wi‑Fi 名称相同也可能无法直连。
 
 ## 下载与安装
@@ -48,7 +48,7 @@
 2. Chrome 打开 `chrome://extensions`。
 3. 打开右上角“开发者模式”。
 4. 点击“加载已解压的扩展程序”，选择解压后的目录（目录中应直接看到 `manifest.json`）。
-5. 打开扩展详情，点击“扩展程序选项”进入设置页。
+5. 打开任意普通网页，在右侧悬浮面板中点击“展开设置”。
 
 完整图文式操作顺序见 [Chrome 插件使用方法](docs/EXTENSION_GUIDE.md) 和 [Android App 使用方法](docs/ANDROID_APP.md)。
 
@@ -62,7 +62,7 @@
 6. 配对成功后选择短信 App，再点“开始传递”。
 7. 在扩展中填写常用手机号并保存。
 
-配对完成后，两端会各自保存一份配对材料。正常重启、关闭浏览器或切换网页都不需要重新配对。手机 Wi-Fi 地址发生变化时，插件会在旧地址连接失败后自动搜索原 Wi-Fi 网段；只有能通过原配对密钥验证的手机才会被接受，找到后会自动保存新地址并重新连接。
+配对完成后，两端会各自保存一份配对材料。正常重启、关闭浏览器或切换网页都不需要重新配对。Chrome 冷启动时会立即连接，并通过持久化闹钟和页面活动事件兜底恢复失败的连接，不需要通过开关 VPN 触发。手机 Wi-Fi 地址发生变化时，插件会在旧地址连接失败后自动搜索原 Wi-Fi 网段；只有能通过原配对密钥验证的手机才会被接受，找到后会自动保存新地址并重新连接。
 
 点击“开始传递”后可以退出 App 或锁屏。Android 常驻通知负责维持手机端服务，Chrome 后台负责心跳和断线重连；App 无需一直停留在前台。手机重启或 App 更新后，若之前处于“正在传递”，App 会自动恢复服务。小米 / Redmi / POCO 用户可点 App 中的“防止后台断开”，一次性允许“验证码传递”自启动。
 
@@ -88,7 +88,7 @@
 - 首次配对使用 P‑256 ECDH、HKDF 和 6 位临时码；会话消息使用 AES‑256‑GCM、单调序号、时间窗和重放保护。
 - 完整短信正文不会落盘或写入日志；Chrome 中的验证码只存于 `chrome.storage.session`，并随本次 5 分钟等待结束而清除。
 - 银行、支付、付款、钱包、转账和交易等高风险通知会在 Android 端直接拦截。
-- 扩展需要普通网页访问权限来识别用户最后点击的输入框，可在设置中配置允许/排除域名。
+- 扩展需要普通网页访问权限来识别用户最后点击的输入框；可在悬浮面板中隐藏当前网站。
 
 更完整的威胁边界见 [安全设计](docs/SECURITY.md)。
 

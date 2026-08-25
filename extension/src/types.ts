@@ -17,7 +17,7 @@ export interface ExtensionConfig {
   allowedDomains: string[];
   excludedDomains: string[];
   soundEnabled: boolean;
-  panelPositions: Record<string, PanelPosition>;
+  panelPosition?: PanelPosition;
 }
 
 export interface BridgeRuntimeState {
@@ -77,7 +77,7 @@ export const DEFAULT_CONFIG: ExtensionConfig = {
   allowedDomains: [],
   excludedDomains: [],
   soundEnabled: true,
-  panelPositions: {}
+  panelPosition: undefined
 };
 
 export const DEFAULT_RUNTIME_STATE: BridgeRuntimeState = {

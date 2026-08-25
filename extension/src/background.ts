@@ -27,6 +27,8 @@ import {
 const CONFIG_KEY = "wifiRelayConfigV2";
 const STATE_KEY = "wifiRelayRuntimeV2";
 const EXPIRY_ALARM = "wifi-relay-state-expiry";
+const RECONNECT_ALARM = "wifi-relay-reconnect";
+const MIN_ALARM_DELAY_MINUTES = 0.5;
 const ARM_TTL_MS = 5 * 60 * 1000;
 const CLOCK_TOLERANCE_MS = 2 * 60 * 1000;
 const LOCAL_NETWORK_PROBE_TTL_MS = 45 * 1000;
@@ -74,12 +76,16 @@ let initialization: Promise<void> | null = null;
 void ensureInitialized();
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create(EXPIRY_ALARM, { periodInMinutes: 0.5 });
   void ensureInitialized();
 });
 chrome.runtime.onStartup.addListener(() => { void ensureInitialized(); });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === EXPIRY_ALARM) void runMaintenance();
+  if (alarm.name === RECONNECT_ALARM) {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = undefined;
+    wakeBridgeConnection();
+  }
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   focusedTargets.delete(tabId);
@@ -90,7 +96,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading") focusedTargets.delete(tabId);
+  if (changeInfo.status === "loading" || changeInfo.status === "complete") wakeBridgeConnection();
 });
+chrome.tabs.onActivated.addListener(() => wakeBridgeConnection());
 chrome.windows.onRemoved.addListener((windowId) => {
   for (const [token, permit] of localNetworkProbePermits) {
     if (permit.permissionWindowId !== windowId) continue;
@@ -98,6 +106,7 @@ chrome.windows.onRemoved.addListener((windowId) => {
     void sendLocalNetworkProbeResult(permit.tabId, token, false, "授权窗口已关闭，请重新点击配对");
   }
 });
+chrome.windows.onFocusChanged.addListener(() => wakeBridgeConnection());
 
 chrome.runtime.onMessage.addListener((message: Record<string, unknown>, sender, sendResponse) => {
   void ensureInitialized()
@@ -118,8 +127,13 @@ async function initialize(): Promise<void> {
   state = { ...DEFAULT_RUNTIME_STATE, ...(stored[STATE_KEY] as Partial<BridgeRuntimeState> | undefined) };
   state.connection = config.pairingKey ? "offline" : "unpaired";
   await evaluateExpiry(false);
-  chrome.alarms.create(EXPIRY_ALARM, { periodInMinutes: 0.5 });
+  await ensureMaintenanceAlarm();
   if (config.pairingKey) connectBridge();
+}
+
+async function ensureMaintenanceAlarm(): Promise<void> {
+  if (await chrome.alarms.get(EXPIRY_ALARM)) return;
+  chrome.alarms.create(EXPIRY_ALARM, { periodInMinutes: MIN_ALARM_DELAY_MINUTES });
 }
 
 async function runMaintenance(): Promise<void> {
@@ -134,23 +148,35 @@ function ensureBridgeConnection(): void {
   connectBridge();
 }
 
+function wakeBridgeConnection(): void {
+  void ensureInitialized().then(ensureBridgeConnection).catch(() => undefined);
+}
+
 async function loadConfig(): Promise<void> {
   const stored = await chrome.storage.local.get(CONFIG_KEY);
-  config = normalizeConfig(stored[CONFIG_KEY] as Partial<ExtensionConfig> | undefined);
+  const storedConfig = stored[CONFIG_KEY] as StoredExtensionConfig | undefined;
+  config = normalizeConfig(storedConfig);
   if (!config.clientId) {
     config.clientId = crypto.randomUUID();
+    await saveConfig();
+  } else if (!storedConfig?.panelPosition && storedConfig?.panelPositions) {
     await saveConfig();
   }
 }
 
-function normalizeConfig(value?: Partial<ExtensionConfig>): ExtensionConfig {
+type StoredExtensionConfig = Partial<ExtensionConfig> & {
+  panelPositions?: Record<string, PanelPosition>;
+};
+
+function normalizeConfig(value?: StoredExtensionConfig): ExtensionConfig {
+  const { panelPositions: legacyPanelPositions, ...current } = value ?? {};
   return {
     ...DEFAULT_CONFIG,
-    ...value,
+    ...current,
     port: Number.isInteger(value?.port) ? value!.port! : DEFAULT_CONFIG.port,
     allowedDomains: normalizeDomains(value?.allowedDomains ?? []),
     excludedDomains: normalizeDomains(value?.excludedDomains ?? []),
-    panelPositions: value?.panelPositions && typeof value.panelPositions === "object" ? value.panelPositions : {}
+    panelPosition: validPanelPosition(value?.panelPosition) ?? lastLegacyPanelPosition(legacyPanelPositions)
   };
 }
 
@@ -172,13 +198,13 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
   const type = String(message.type ?? "");
   switch (type) {
     case "GET_CONTENT_INIT": {
+      ensureBridgeConnection();
       const url = policyUrl(sender.url ?? "", message.policyUrl);
       const allowed = isUrlAllowed(url);
-      const origin = safeOrigin(url);
       const tabId = sender.tab?.id;
       return {
         allowed,
-        position: origin ? config.panelPositions[origin] : undefined,
+        position: config.panelPosition,
         state: sender.frameId === 0 && tabId !== undefined ? panelStateForTab(tabId) : undefined,
         soundEnabled: config.soundEnabled
       };
@@ -246,7 +272,7 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       const origin = safeOrigin(sender.url ?? sender.tab?.url ?? "");
       const position = message.position as Partial<PanelPosition> | undefined;
       if (!origin || !position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) return {};
-      config.panelPositions[origin] = {
+      config.panelPosition = {
         x: Math.round(Number(position.x)),
         y: Math.round(Number(position.y)),
         collapsed: Boolean(position.collapsed)
@@ -255,6 +281,7 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       return {};
     }
     case "GET_OPTIONS":
+      ensureBridgeConnection();
       return { config: publicConfig(), state: panelStateForTab(-1) };
     case "INLINE_SAVE_PHONE": {
       const phoneNumber = String(message.phoneNumber ?? "").replace(/[\s-]/g, "");
@@ -334,30 +361,6 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       }
       return {};
     }
-    case "SAVE_OPTIONS": {
-      const incoming = message.config as Partial<ExtensionConfig> | undefined;
-      if (!incoming) throw new Error("设置内容无效");
-      const host = String(incoming.host ?? "").trim();
-      const port = Number(incoming.port);
-      validateHostAndPort(host, port);
-      const phoneNumber = String(incoming.phoneNumber ?? "").replace(/[\s-]/g, "");
-      if (phoneNumber && !/^\+?\d{6,15}$/.test(phoneNumber)) throw new Error("手机号格式无效");
-      const addressChanged = host !== config.host || port !== config.port;
-      config = {
-        ...config,
-        host,
-        port,
-        phoneNumber,
-        allowedDomains: normalizeDomains(incoming.allowedDomains ?? []),
-        excludedDomains: normalizeDomains(incoming.excludedDomains ?? []),
-        soundEnabled: incoming.soundEnabled !== false
-      };
-      await saveConfig();
-      if (addressChanged && config.pairingKey) connectBridge();
-      await notifyDisabledTabs();
-      await broadcastState();
-      return {};
-    }
     case "PAIR": {
       const host = String(message.host ?? "").trim();
       const port = Number(message.port);
@@ -366,27 +369,6 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       if (!/^\d{6}$/.test(pairCode)) throw new Error("请输入手机上显示的 6 位配对码");
       if (config.pairingKey) throw new Error("请先解除现有配对");
       await pairDevice(host, port, pairCode);
-      return { config: publicConfig() };
-    }
-    case "STORE_PAIRING": {
-      const senderUrl = sender.url?.replace(/[?#].*$/, "");
-      if (sender.id !== chrome.runtime.id || senderUrl !== chrome.runtime.getURL("options.html")) {
-        throw new Error("只允许从扩展设置页完成配对");
-      }
-      if (config.pairingKey) throw new Error("请先解除现有配对");
-      const host = String(message.host ?? "").trim();
-      const port = Number(message.port);
-      const deviceId = String(message.deviceId ?? "");
-      const pairingKey = String(message.pairingKey ?? "");
-      validateHostAndPort(host, port);
-      if (deviceId.length < 16 || base64ToBytes(pairingKey).length !== 32) throw new Error("配对结果无效");
-      config.host = host;
-      config.port = port;
-      config.deviceId = deviceId;
-      config.pairingKey = pairingKey;
-      await saveConfig();
-      await updateState({ connection: "offline", error: undefined });
-      connectBridge();
       return { config: publicConfig() };
     }
     case "UNPAIR": {
@@ -476,7 +458,7 @@ function connectBridge(): void {
   }
 
   connectionTimeoutTimer = setTimeout(() => {
-    if (generation !== socketGeneration || !socket || socket.readyState === WebSocket.OPEN) return;
+    if (generation !== socketGeneration || !socket) return;
     const timedOutSocket = socket;
     socket = null;
     timedOutSocket.onopen = null;
@@ -484,7 +466,7 @@ function connectBridge(): void {
     timedOutSocket.onerror = null;
     timedOutSocket.onclose = null;
     try { timedOutSocket.close(); } catch { /* already closed */ }
-    handleDisconnect(generation, "旧地址连接超时，正在查找已配对手机");
+    handleDisconnect(generation, "手机连接或认证超时，正在查找已配对手机");
   }, BRIDGE_CONNECT_TIMEOUT_MS);
 
   socket.onopen = () => {
@@ -514,6 +496,7 @@ function connectBridge(): void {
 
 function disconnectBridge(incrementGeneration = true): void {
   if (incrementGeneration) socketGeneration += 1;
+  if (incrementGeneration) void chrome.alarms.clear(RECONNECT_ALARM);
   if (reconnectTimer) clearTimeout(reconnectTimer);
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (connectionTimeoutTimer) clearTimeout(connectionTimeoutTimer);
@@ -546,6 +529,7 @@ function handleDisconnect(generation: number, message: string): void {
   const waitState = state.waitState === "ARMED" ? "ARMED_OFFLINE" : state.waitState;
   void updateState({ connection: config.pairingKey ? "offline" : "unpaired", waitState, error: message });
   if (!config.pairingKey) return;
+  scheduleReconnectWake(reconnectDelay);
   if (canDiscoverAddress()) {
     startAddressDiscovery(generation);
     return;
@@ -555,8 +539,19 @@ function handleDisconnect(generation: number, message: string): void {
 
 function scheduleReconnect(): void {
   if (reconnectTimer || !config.pairingKey) return;
-  reconnectTimer = setTimeout(connectBridge, reconnectDelay);
+  const delay = reconnectDelay;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = undefined;
+    connectBridge();
+  }, delay);
+  scheduleReconnectWake(delay);
   reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
+}
+
+function scheduleReconnectWake(delay: number): void {
+  chrome.alarms.create(RECONNECT_ALARM, {
+    delayInMinutes: Math.max(MIN_ALARM_DELAY_MINUTES, delay / 60_000)
+  });
 }
 
 function canDiscoverAddress(): boolean {
@@ -730,6 +725,7 @@ async function handleHandshakeMessage(message: Record<string, unknown>): Promise
   incomingSeq = 0;
   outgoingSeq = 0;
   reconnectDelay = 1_000;
+  void chrome.alarms.clear(RECONNECT_ALARM);
   lastAddressDiscoveryAt = 0;
   if (connectionTimeoutTimer) clearTimeout(connectionTimeoutTimer);
   connectionTimeoutTimer = undefined;
@@ -987,15 +983,6 @@ async function broadcastState(): Promise<void> {
       // Restricted pages and tabs without the content script are expected.
     }
   }));
-  try { await chrome.runtime.sendMessage({ type: "OPTIONS_STATE", state: panelStateForTab(-1), address }); } catch { /* options page is closed */ }
-}
-
-async function notifyDisabledTabs(): Promise<void> {
-  const tabs = await chrome.tabs.query({});
-  await Promise.all(tabs.map(async (tab) => {
-    if (tab.id === undefined || !tab.url || isUrlAllowed(tab.url)) return;
-    try { await chrome.tabs.sendMessage(tab.id, { type: "POLICY_DISABLED" }, { frameId: 0 }); } catch { /* restricted tab */ }
-  }));
 }
 
 function panelStateForTab(tabId: number): PanelState {
@@ -1014,8 +1001,8 @@ function panelStateForTab(tabId: number): PanelState {
   return base;
 }
 
-function publicConfig(): Omit<ExtensionConfig, "pairingKey" | "panelPositions"> & { paired: boolean } {
-  const { pairingKey: _key, panelPositions: _positions, ...safe } = config;
+function publicConfig(): Omit<ExtensionConfig, "pairingKey" | "panelPosition"> & { paired: boolean } {
+  const { pairingKey: _key, panelPosition: _position, ...safe } = config;
   return { ...safe, paired: Boolean(config.pairingKey && config.deviceId) };
 }
 
@@ -1088,6 +1075,26 @@ function hostnameFromUrl(url: string): string {
 
 function safeOrigin(url: string): string {
   try { return new URL(url).origin; } catch { return ""; }
+}
+
+function validPanelPosition(value: unknown): PanelPosition | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const position = value as Partial<PanelPosition>;
+  if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) return undefined;
+  return {
+    x: Math.round(Number(position.x)),
+    y: Math.round(Number(position.y)),
+    collapsed: Boolean(position.collapsed)
+  };
+}
+
+function lastLegacyPanelPosition(positions?: Record<string, PanelPosition>): PanelPosition | undefined {
+  if (!positions || typeof positions !== "object" || Array.isArray(positions)) return undefined;
+  for (const position of Object.values(positions).reverse()) {
+    const valid = validPanelPosition(position);
+    if (valid) return valid;
+  }
+  return undefined;
 }
 
 function policyUrl(senderUrl: string, fallback: unknown): string {
