@@ -48,6 +48,12 @@ class BridgeCoordinator(private val context: Context) {
             pairingAllowed = { activityVisible },
             notificationAccessProvider = { hasNotificationAccess() && OtpNotificationListener.isConnected },
             onPairingComplete = { pairCode = null },
+            onArmActivated = { arm ->
+                OtpNotificationListener.recoverRecentNotifications(
+                    context,
+                    arm.createdAt - CLOCK_SKEW_ALLOWANCE_MS
+                )
+            },
             onOtpAcknowledged = {
                 lastCode = null
                 lastCodeAt = null

@@ -22,6 +22,7 @@ class BridgeSocketServer(
     private val pairingAllowed: () -> Boolean,
     private val notificationAccessProvider: () -> Boolean,
     private val onPairingComplete: () -> Unit,
+    private val onArmActivated: (ArmSession) -> Unit,
     private val onOtpAcknowledged: (String) -> Unit,
     private val onStateChanged: (String) -> Unit
 ) : WebSocketServer(address) {
@@ -398,7 +399,7 @@ class BridgeSocketServer(
             }
         }.ifEmpty { (4..8).toSet() }
         val arm = ArmSession(requestId, createdAt, expiresAt, digits, payload.optString("siteLabel").take(80))
-        synchronized(stateLock) {
+        val isNewRequest = synchronized(stateLock) {
             val sameRequest = activeArm?.requestId == arm.requestId
             activeClient = connection
             activeArm = arm
@@ -406,9 +407,11 @@ class BridgeSocketServer(
                 pendingOtp = null
                 deliveredForArm = 0
             }
+            !sameRequest
         }
         sendEncrypted(connection, "ACK", JSONObject().put("kind", "ARMED").put("requestId", requestId))
         onStateChanged("正在等待验证码")
+        if (isNewRequest) onArmActivated(arm)
     }
 
     private fun handleCancel(connection: WebSocket, payload: JSONObject) {

@@ -3,7 +3,7 @@
   "name": "验证码传递",
   "short_name": "验证码传递",
   "description": "把手机收到的短信验证码传到电脑，并在确认后填入网页。",
-  "version": "2.2.3",
+  "version": "2.2.4",
   "minimum_chrome_version": "120",
   "permissions": ["storage", "tabs", "alarms", "webNavigation"],
   "host_permissions": ["http://*/*", "https://*/*"],

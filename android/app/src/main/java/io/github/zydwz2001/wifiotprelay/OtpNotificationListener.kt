@@ -24,11 +24,7 @@ class OtpNotificationListener : NotificationListenerService() {
         isConnected = true
         disconnectedSinceElapsedRealtime = 0L
         coordinator.onNotificationAccessMayHaveChanged()
-        try {
-            activeNotifications.orEmpty().forEach(::onNotificationPosted)
-        } catch (_: Exception) {
-            // Some vendor builds briefly deny access while the listener is rebinding.
-        }
+        replayActiveNotifications(Long.MIN_VALUE)
     }
 
     override fun onListenerDisconnected() {
@@ -122,6 +118,18 @@ class OtpNotificationListener : NotificationListenerService() {
         if (text.isNotEmpty() && output.size < MAX_TEXT_PARTS) output += text.take(MAX_TEXT_LENGTH)
     }
 
+    private fun replayActiveNotifications(earliestPostTime: Long) {
+        try {
+            activeNotifications.orEmpty()
+                .asSequence()
+                .filter { shouldReplayActiveNotification(it.postTime, earliestPostTime) }
+                .sortedBy { it.postTime }
+                .forEach(::onNotificationPosted)
+        } catch (_: Exception) {
+            // Some vendor builds briefly deny access while the listener is rebinding.
+        }
+    }
+
     companion object {
         private const val MAX_BUNDLE_DEPTH = 4
         private const val MAX_TEXT_PARTS = 64
@@ -139,6 +147,24 @@ class OtpNotificationListener : NotificationListenerService() {
 
         @Volatile
         private var lastForcedReconnectAt: Long = 0L
+
+        fun recoverRecentNotifications(context: Context, earliestPostTime: Long) {
+            if (!isConnected) {
+                try {
+                    requestReconnect(context, force = true)
+                } catch (_: Exception) {
+                    // The scheduled rechecks still run if the vendor rejects a
+                    // direct rebind request while Android is changing state.
+                }
+            }
+            val handler = Handler(Looper.getMainLooper())
+            NOTIFICATION_REPLAY_DELAYS_MS.forEach { delay ->
+                handler.postDelayed(
+                    { activeInstance?.replayActiveNotifications(earliestPostTime) },
+                    delay
+                )
+            }
+        }
 
         fun disconnectedForMs(now: Long = SystemClock.elapsedRealtime()): Long =
             if (isConnected) 0L else (now - disconnectedSinceElapsedRealtime).coerceAtLeast(0L)
@@ -183,3 +209,8 @@ class OtpNotificationListener : NotificationListenerService() {
         private const val FORCE_RECONNECT_COOLDOWN_MS = 45_000L
     }
 }
+
+internal val NOTIFICATION_REPLAY_DELAYS_MS = listOf(0L, 750L, 2_000L)
+
+internal fun shouldReplayActiveNotification(postedAt: Long, earliestPostTime: Long): Boolean =
+    postedAt >= earliestPostTime
