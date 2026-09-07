@@ -10,7 +10,7 @@ import {
   randomBase64,
   verifyHmac
 } from "./crypto";
-import { findVerifiedCandidate, sameSubnetCandidates } from "./discovery";
+import { findVerifiedCandidate, pairedDeviceHostname, sameSubnetCandidates } from "./discovery";
 import { orderedFrameIds } from "./frame-targets";
 import {
   DEFAULT_CONFIG,
@@ -34,6 +34,7 @@ const CLOCK_TOLERANCE_MS = 2 * 60 * 1000;
 const LOCAL_NETWORK_PROBE_TTL_MS = 45 * 1000;
 const ADDRESS_DISCOVERY_INTERVAL_MS = 5 * 60 * 1000;
 const BRIDGE_CONNECT_TIMEOUT_MS = 8_000;
+const MDNS_ADDRESS_PROBE_TIMEOUT_MS = 8_000;
 const NEARBY_ADDRESS_COUNT = 16;
 const NEARBY_ADDRESS_PROBE_TIMEOUT_MS = 5_000;
 const NEARBY_ADDRESS_PROBE_CONCURRENCY = 2;
@@ -441,7 +442,7 @@ async function pairDevice(host: string, port: number, pairCode: string): Promise
   connectBridge();
 }
 
-function connectBridge(): void {
+function connectBridge(hostOverride?: string): void {
   disconnectBridge(false);
   if (!config.pairingKey || !config.deviceId || !config.host) {
     void updateState({ connection: "unpaired" });
@@ -449,9 +450,10 @@ function connectBridge(): void {
   }
 
   const generation = ++socketGeneration;
+  const targetHost = hostOverride ?? config.host;
   void updateState({ connection: "connecting", error: undefined });
   try {
-    socket = new WebSocket(bridgeUrl(config.host, config.port));
+    socket = new WebSocket(bridgeUrl(targetHost, config.port, config.deviceId));
   } catch {
     handleDisconnect(generation, "手机地址无效");
     return;
@@ -576,13 +578,23 @@ function startAddressDiscovery(generation: number): void {
   const run = (async (): Promise<void> => {
     const key = base64ToBytes(pairingKey);
     const candidates = sameSubnetCandidates(staleHost);
+    const discoveryHost = pairedDeviceHostname(deviceId);
+    const initialCandidates = discoveryHost
+      ? [discoveryHost, ...candidates.slice(0, NEARBY_ADDRESS_COUNT)]
+      : candidates.slice(0, NEARBY_ADDRESS_COUNT);
     const isUnchanged = (): boolean => generation === socketGeneration &&
       config.host === staleHost && config.port === port &&
       config.deviceId === deviceId && config.pairingKey === pairingKey;
     let found = await findVerifiedCandidate(
-      candidates.slice(0, NEARBY_ADDRESS_COUNT),
+      initialCandidates,
       (candidate, signal) => probePairedPhone(
-        candidate, port, deviceId, clientId, key, NEARBY_ADDRESS_PROBE_TIMEOUT_MS, signal
+        candidate,
+        port,
+        deviceId,
+        clientId,
+        key,
+        candidate === discoveryHost ? MDNS_ADDRESS_PROBE_TIMEOUT_MS : NEARBY_ADDRESS_PROBE_TIMEOUT_MS,
+        signal
       ),
       NEARBY_ADDRESS_PROBE_CONCURRENCY
     );
@@ -599,8 +611,15 @@ function startAddressDiscovery(generation: number): void {
     if (!unchanged) return;
 
     if (!found) {
-      await updateState({ connection: "offline", error: "手机未连接；已自动查找同一 Wi-Fi，仍未发现" });
+      await updateState({ connection: "offline", error: "手机未连接；已自动查找当前及原 Wi-Fi 网段，仍未发现" });
       scheduleReconnect();
+      return;
+    }
+
+    if (found === discoveryHost) {
+      reconnectDelay = 1_000;
+      await updateState({ connection: "connecting", error: undefined });
+      connectBridge(found);
       return;
     }
 
@@ -648,7 +667,7 @@ function probePairedPhone(
     }
 
     try {
-      probe = new WebSocket(bridgeUrl(host, port));
+      probe = new WebSocket(bridgeUrl(host, port, deviceId));
     } catch {
       finish(false);
       return;
@@ -752,6 +771,11 @@ async function handleBusinessMessage(type: Envelope["type"], payload: Record<str
   if (type === "PONG") return;
   if (type === "ACK") {
     if (payload.kind === "STATUS") {
+      const advertisedHost = String(payload.hostAddress ?? "");
+      if (isPrivateWifiIpv4(advertisedHost) && advertisedHost !== config.host) {
+        config.host = advertisedHost;
+        await saveConfig();
+      }
       await updateState({ notificationAccess: Boolean(payload.notificationAccess) });
     } else if (payload.kind === "ARMED" && payload.requestId === state.requestId) {
       confirmedArmRequestId = String(payload.requestId);
@@ -1032,6 +1056,10 @@ async function sendLocalNetworkProbeResult(tabId: number, token: string, ok: boo
 
 function validateHostAndPort(host: string, port: number): void {
   if (!isPrivateWifiIpv4(host)) throw new Error("请输入 App 显示的 Wi-Fi 地址，例如 192.168.1.23");
+  validatePort(port);
+}
+
+function validatePort(port: number): void {
   if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("端口必须在 1024–65535 之间");
 }
 
@@ -1043,8 +1071,10 @@ function isPrivateWifiIpv4(host: string): boolean {
     (parts[0] === 192 && parts[1] === 168);
 }
 
-function bridgeUrl(host: string, port: number): string {
-  validateHostAndPort(host, port);
+function bridgeUrl(host: string, port: number, deviceId?: string): string {
+  const expectedDiscoveryHost = deviceId ? pairedDeviceHostname(deviceId) : undefined;
+  if (!expectedDiscoveryHost || host !== expectedDiscoveryHost) validateHostAndPort(host, port);
+  else validatePort(port);
   return `ws://${host}:${port}/v1/bridge`;
 }
 

@@ -17,6 +17,7 @@ class BridgeCoordinator(private val context: Context) {
     val config = ConfigStore(context)
 
     @Volatile private var server: BridgeSocketServer? = null
+    private val mdnsAdvertiser = BridgeMdnsAdvertiser(context)
     @Volatile private var activityVisible = false
     @Volatile private var pairCode: PairCodeState? = null
     @Volatile private var diagnostic = "验证码传递尚未开始"
@@ -35,14 +36,14 @@ class BridgeCoordinator(private val context: Context) {
             return
         }
         val current = server
-        if (current != null && current.hostAddress == address && current.listenPort == config.port) return
+        if (current != null && current.hostAddress == address.hostAddress && current.listenPort == config.port) return
 
         stopServerInternal()
         val created = BridgeSocketServer(
             // Bind only to the Wi-Fi interface. This edition intentionally does
             // not expose the bridge through VPN, USB forwarding or mobile data.
             InetSocketAddress(address, config.port),
-            address,
+            address.hostAddress.orEmpty(),
             config,
             pairCodeProvider = { currentPairCode() },
             pairingAllowed = { activityVisible },
@@ -63,8 +64,10 @@ class BridgeCoordinator(private val context: Context) {
         server = created
         try {
             created.start()
+            mdnsAdvertiser.start(address, config.port, config.deviceId)
             diagnostic = "正在启动验证码传递"
         } catch (_: Exception) {
+            mdnsAdvertiser.stop()
             server = null
             diagnostic = "启动失败，请重新尝试"
         }
@@ -253,7 +256,7 @@ class BridgeCoordinator(private val context: Context) {
         "短信"
     }
 
-    private fun findLanAddress(): String? {
+    private fun findLanAddress(): Inet4Address? {
         val manager = context.getSystemService(ConnectivityManager::class.java)
         val connectivityAddresses = manager.allNetworks
             .filter { network ->
@@ -261,11 +264,12 @@ class BridgeCoordinator(private val context: Context) {
             }
             .flatMap { network -> manager.getLinkProperties(network)?.linkAddresses.orEmpty() }
             .map { it.address }
-        return selectWifiAddress(connectivityAddresses)?.hostAddress
+        return selectWifiAddress(connectivityAddresses)
     }
 
     @Synchronized
     private fun stopServerInternal() {
+        mdnsAdvertiser.stop()
         server?.stopSafely()
         server = null
     }

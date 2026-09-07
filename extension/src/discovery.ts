@@ -15,6 +15,12 @@ export function sameSubnetCandidates(previousHost: string): string[] {
   return candidates;
 }
 
+export function pairedDeviceHostname(deviceId: string): string | undefined {
+  const stableId = deviceId.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16);
+  if (stableId.length < 8) return undefined;
+  return `otp-${stableId}.local`;
+}
+
 export async function findVerifiedCandidate(
   candidates: string[],
   probe: (candidate: string, signal: AbortSignal) => Promise<boolean>,

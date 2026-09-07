@@ -445,6 +445,7 @@ class BridgeSocketServer(
             JSONObject()
                 .put("kind", "STATUS")
                 .put("notificationAccess", notificationAccessProvider())
+                .put("hostAddress", hostAddress)
                 .put("serverTime", System.currentTimeMillis())
         )
     }

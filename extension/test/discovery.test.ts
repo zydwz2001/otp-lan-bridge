@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { findVerifiedCandidate, sameSubnetCandidates } from "../src/discovery";
+import { findVerifiedCandidate, pairedDeviceHostname, sameSubnetCandidates } from "../src/discovery";
+
+describe("pairedDeviceHostname", () => {
+  it("derives the same stable local hostname from a paired UUID", () => {
+    expect(pairedDeviceHostname("CA8F82B4-12B4-4DC8-954F-52B50DB52EA1"))
+      .toBe("otp-ca8f82b412b44dc8.local");
+  });
+
+  it("rejects identifiers too short to form a safe device hostname", () => {
+    expect(pairedDeviceHostname("bad-id")).toBeUndefined();
+  });
+});
 
 describe("sameSubnetCandidates", () => {
   it("tries nearby DHCP addresses first without retrying the stale host", () => {
