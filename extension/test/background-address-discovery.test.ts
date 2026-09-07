@@ -1,3 +1,5 @@
+// @vitest-environment node
+
 import { afterEach, expect, it, vi } from "vitest";
 import { bytesToBase64, deriveSessionKey, encryptEnvelope, hmac } from "../src/crypto";
 
