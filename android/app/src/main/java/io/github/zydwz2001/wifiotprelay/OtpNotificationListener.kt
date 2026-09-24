@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.SystemClock
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
@@ -14,9 +15,29 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
+import java.io.FileDescriptor
+import java.io.PrintWriter
 
 class OtpNotificationListener : NotificationListenerService() {
     private val coordinator get() = (application as BridgeApplication).coordinator
+    private val handler = Handler(Looper.getMainLooper())
+    private var captureWakeLock: PowerManager.WakeLock? = null
+    private var wakeLockRequestId: String? = null
+    private var snapshotReadCount = 0L
+    private var snapshotReadFailureCount = 0L
+    private var smsCallbackCount = 0L
+    private var lastSmsCallbackAt = 0L
+    private var lastSnapshotSmsPostTime = 0L
+    private val replayLoop = NotificationReplayLoop(
+        captureSession = { if (activeInstance === this && isConnected) coordinator.captureSession() else null },
+        replay = { arm ->
+            keepCaptureAwake(arm)
+            replayActiveNotifications(arm.createdAt - NOTIFICATION_RACE_WINDOW_MS)
+        },
+        schedule = { task, delay -> handler.postDelayed(task, delay) },
+        cancel = { handler.removeCallbacks(it) },
+        onStopped = { releaseCaptureWakeLock() }
+    )
 
     override fun onListenerConnected() {
         super.onListenerConnected()
@@ -24,10 +45,11 @@ class OtpNotificationListener : NotificationListenerService() {
         isConnected = true
         disconnectedSinceElapsedRealtime = 0L
         coordinator.onNotificationAccessMayHaveChanged()
-        replayActiveNotifications(Long.MIN_VALUE)
+        replayLoop.start()
     }
 
     override fun onListenerDisconnected() {
+        replayLoop.stop()
         if (markDisconnected(this)) {
             coordinator.onNotificationAccessMayHaveChanged()
             requestReconnect(this)
@@ -36,11 +58,20 @@ class OtpNotificationListener : NotificationListenerService() {
     }
 
     override fun onDestroy() {
+        replayLoop.stop()
         markDisconnected(this)
         super.onDestroy()
     }
 
     override fun onNotificationPosted(statusBarNotification: StatusBarNotification) {
+        if (statusBarNotification.packageName == coordinator.selectedSmsPackage()) {
+            smsCallbackCount++
+            lastSmsCallbackAt = System.currentTimeMillis()
+        }
+        inspectNotification(statusBarNotification)
+    }
+
+    private fun inspectNotification(statusBarNotification: StatusBarNotification) {
         val packageName = statusBarNotification.packageName
         val postedAt = statusBarNotification.postTime
         coordinator.noteNotificationObserved(packageName, postedAt)
@@ -120,14 +151,52 @@ class OtpNotificationListener : NotificationListenerService() {
 
     private fun replayActiveNotifications(earliestPostTime: Long) {
         try {
+            snapshotReadCount++
             activeNotifications.orEmpty()
                 .asSequence()
+                .filter { it.packageName == coordinator.selectedSmsPackage() }
                 .filter { shouldReplayActiveNotification(it.postTime, earliestPostTime) }
                 .sortedBy { it.postTime }
-                .forEach(::onNotificationPosted)
+                .forEach {
+                    lastSnapshotSmsPostTime = it.postTime
+                    inspectNotification(it)
+                }
         } catch (_: Exception) {
+            snapshotReadFailureCount++
             // Some vendor builds briefly deny access while the listener is rebinding.
         }
+    }
+
+    override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>) {
+        // Timing/counters only: never include OTPs, notification keys or bodies.
+        writer.println("listenerConnected=$isConnected")
+        writer.println("captureActive=${coordinator.captureSession() != null}")
+        writer.println("captureWakeLockHeld=${captureWakeLock?.isHeld == true}")
+        writer.println("snapshotReads=$snapshotReadCount snapshotFailures=$snapshotReadFailureCount")
+        writer.println("smsCallbacks=$smsCallbackCount lastSmsCallbackAt=$lastSmsCallbackAt")
+        writer.println("lastSnapshotSmsPostTime=$lastSnapshotSmsPostTime")
+        writer.println("diagnostic=${coordinator.snapshot().diagnostic}")
+    }
+
+    private fun keepCaptureAwake(arm: ArmSession) {
+        if (captureWakeLock?.isHeld == true && wakeLockRequestId == arm.requestId) return
+        releaseCaptureWakeLock()
+        val remaining = (arm.expiresAt - System.currentTimeMillis()).coerceIn(1L, 5 * 60_000L)
+        captureWakeLock = getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "wifiotprelay:otp-wait")
+            .apply {
+                setReferenceCounted(false)
+                // Never illuminate/unlock the screen; Android also releases this
+                // lock at expiry if our cancellation callback cannot run.
+                acquire(remaining)
+            }
+        wakeLockRequestId = arm.requestId
+    }
+
+    private fun releaseCaptureWakeLock() {
+        captureWakeLock?.let { if (it.isHeld) it.release() }
+        captureWakeLock = null
+        wakeLockRequestId = null
     }
 
     companion object {
@@ -148,22 +217,15 @@ class OtpNotificationListener : NotificationListenerService() {
         @Volatile
         private var lastForcedReconnectAt: Long = 0L
 
-        fun recoverRecentNotifications(context: Context, earliestPostTime: Long) {
+        fun recoverRecentNotifications(context: Context) {
             if (!isConnected) {
                 try {
                     requestReconnect(context, force = true)
                 } catch (_: Exception) {
-                    // The scheduled rechecks still run if the vendor rejects a
-                    // direct rebind request while Android is changing state.
+                    // The foreground service keeps retrying the listener binding.
                 }
             }
-            val handler = Handler(Looper.getMainLooper())
-            NOTIFICATION_REPLAY_DELAYS_MS.forEach { delay ->
-                handler.postDelayed(
-                    { activeInstance?.replayActiveNotifications(earliestPostTime) },
-                    delay
-                )
-            }
+            Handler(Looper.getMainLooper()).post { activeInstance?.replayLoop?.start() }
         }
 
         fun disconnectedForMs(now: Long = SystemClock.elapsedRealtime()): Long =
@@ -209,8 +271,3 @@ class OtpNotificationListener : NotificationListenerService() {
         private const val FORCE_RECONNECT_COOLDOWN_MS = 45_000L
     }
 }
-
-internal val NOTIFICATION_REPLAY_DELAYS_MS = listOf(0L, 750L, 2_000L)
-
-internal fun shouldReplayActiveNotification(postedAt: Long, earliestPostTime: Long): Boolean =
-    postedAt >= earliestPostTime

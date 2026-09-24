@@ -49,12 +49,7 @@ class BridgeCoordinator(private val context: Context) {
             pairingAllowed = { activityVisible },
             notificationAccessProvider = { hasNotificationAccess() && OtpNotificationListener.isConnected },
             onPairingComplete = { pairCode = null },
-            onArmActivated = { arm ->
-                OtpNotificationListener.recoverRecentNotifications(
-                    context,
-                    arm.createdAt - CLOCK_SKEW_ALLOWANCE_MS
-                )
-            },
+            onArmActivated = { OtpNotificationListener.recoverRecentNotifications(context) },
             onOtpAcknowledged = {
                 lastCode = null
                 lastCodeAt = null
@@ -122,26 +117,29 @@ class BridgeCoordinator(private val context: Context) {
     fun shouldInspect(packageName: String, postedAt: Long): Boolean {
         val selectedPackage = selectedSmsPackage() ?: return false
         if (packageName != selectedPackage) return false
-        val arm = server?.captureSession(postedAt) ?: return false
-        return postedAt >= arm.createdAt - CLOCK_SKEW_ALLOWANCE_MS
+        val arm = captureSession() ?: return false
+        return postedAt >= arm.createdAt - NOTIFICATION_RACE_WINDOW_MS
     }
 
+    fun captureSession(): ArmSession? = if (config.bridgeEnabled) server?.captureSession() else null
+
     fun noteNotificationObserved(packageName: String, postedAt: Long) {
-        val arm = server?.captureSession(postedAt) ?: return
-        if (postedAt < arm.createdAt - CLOCK_SKEW_ALLOWANCE_MS) return
+        val arm = captureSession() ?: return
+        if (postedAt < arm.createdAt - NOTIFICATION_RACE_WINDOW_MS) return
         lastObservedNotificationPackage = packageName
         lastObservedNotificationAt = postedAt
     }
 
     fun handleNotification(payload: NotificationPayload) {
         val activeServer = server ?: return
-        val arm = activeServer.captureSession(payload.postedAt) ?: return
-        if (payload.packageName != selectedSmsPackage() || payload.postedAt < arm.createdAt - CLOCK_SKEW_ALLOWANCE_MS) return
+        val arm = captureSession() ?: return
+        if (payload.packageName != selectedSmsPackage() || payload.postedAt < arm.createdAt - NOTIFICATION_RACE_WINDOW_MS) return
 
         when (val result = OtpParser.parse(payload.combinedText(), arm.expectedDigits)) {
             OtpParseResult.NoContent -> {
+                val changed = diagnostic != "短信通知隐藏了内容"
                 diagnostic = "短信通知隐藏了内容"
-                activeServer.sendDiagnostic("NOTIFICATION_CONTENT_HIDDEN", "短信通知隐藏了内容，请开启通知内容显示")
+                if (changed) activeServer.sendDiagnostic("NOTIFICATION_CONTENT_HIDDEN", "短信通知隐藏了内容，请开启通知内容显示")
             }
             OtpParseResult.HighRisk -> diagnostic = "已拦截高风险通知"
             OtpParseResult.NoConfidentCandidate -> {
@@ -153,9 +151,9 @@ class BridgeCoordinator(private val context: Context) {
             }
             is OtpParseResult.Match -> {
                 val fingerprint = CryptoBox.fingerprint(
-                    listOf(payload.packageName, payload.notificationKey, result.code, (payload.postedAt / 60_000).toString())
+                    listOf(payload.packageName, payload.notificationKey, result.code)
                 )
-                if (!activeServer.markFingerprintIfNew(fingerprint, payload.postedAt)) return
+                if (!activeServer.markFingerprintIfNew(fingerprint, arm)) return
                 val sent = activeServer.deliverOtp(
                     arm, result.code, emptyList(), result.confidence, payload.postedAt, sourceAppLabel(payload.packageName)
                 )
@@ -164,22 +162,22 @@ class BridgeCoordinator(private val context: Context) {
                     lastCodeAt = payload.postedAt
                     diagnostic = "验证码已发送到浏览器"
                 } else {
-                    activeServer.releaseFingerprint(fingerprint, payload.postedAt)
+                    activeServer.releaseFingerprint(fingerprint, arm)
                     diagnostic = "验证码发送失败，正在等待通知重试"
                 }
             }
             is OtpParseResult.Ambiguous -> {
                 val fingerprint = CryptoBox.fingerprint(
-                    listOf(payload.packageName, payload.notificationKey, result.candidates.joinToString(","), (payload.postedAt / 60_000).toString())
+                    listOf(payload.packageName, payload.notificationKey, result.candidates.joinToString(","))
                 )
-                if (!activeServer.markFingerprintIfNew(fingerprint, payload.postedAt)) return
+                if (!activeServer.markFingerprintIfNew(fingerprint, arm)) return
                 if (activeServer.deliverOtp(
                         arm, null, result.candidates, result.confidence, payload.postedAt, sourceAppLabel(payload.packageName)
                     )
                 ) {
                     diagnostic = "识别到多个候选验证码，等待浏览器确认"
                 } else {
-                    activeServer.releaseFingerprint(fingerprint, payload.postedAt)
+                    activeServer.releaseFingerprint(fingerprint, arm)
                     diagnostic = "验证码发送失败，正在等待通知重试"
                 }
             }
@@ -276,11 +274,12 @@ class BridgeCoordinator(private val context: Context) {
 
     companion object {
         private const val PAIR_CODE_TTL_MS = 30 * 60 * 1000L
-        private const val CLOCK_SKEW_ALLOWANCE_MS = 5_000L
         private const val OTP_LOCAL_TTL_MS = 2 * 60 * 1000L
         private const val OBSERVED_NOTIFICATION_TTL_MS = 10 * 60 * 1000L
     }
 }
+
+internal const val NOTIFICATION_RACE_WINDOW_MS = 5_000L
 
 internal fun selectWifiAddress(addresses: List<InetAddress>): Inet4Address? = addresses
         .filterIsInstance<Inet4Address>()

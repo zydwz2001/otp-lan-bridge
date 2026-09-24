@@ -28,11 +28,16 @@
 
 ## 4. 测试码成功，真实短信失败
 
+- 如果下拉通知栏后验证码才传来：2.2.5 及以前只在开始等待后的 0、0.75、2 秒回查通知，之后完全依赖系统回调。Android 2.2.6 在整个等待期间每秒回查，并临时保持 CPU 唤醒，防止只能等待通知栏刷新或手机唤醒才继续处理。覆盖安装 APK 即可，原配对保留。
 - 先查看 App 前台是否明确显示“通知读取：已连接，可以接收短信”。如果显示“未连接”，点击顶部“立即修复通知读取”，在系统页面关闭后重新开启该权限。
 - App 选择的短信包名必须等于最近真实通知来源。
 - 通知预览必须显示正文数字；“隐藏敏感通知内容”会让 App 无法解析。
 - 建议先在网页点击“一键填充并等待”，再请求短信；如果短信与等待指令几乎同时到达，新版 App 会自动回查近期通知。
 - 银行、支付、钱包、转账或交易通知会按安全策略被主动拦截。
+
+开发排查可运行 `adb shell dumpsys activity service io.github.zydwz2001.wifiotprelay/.OtpNotificationListener`。`snapshotReads` 应在等待期间持续增加，`captureWakeLockHeld` 应在等待结束后变为 `false`；`smsCallbacks` 只统计系统实际回调，不把回查算作回调。这些诊断仅包含计数、时间和状态，不输出验证码或短信正文。
+
+若回查正常但通知没有正文，应继续检查系统的内容隐藏设置。[Android 通知监听 API](https://developer.android.com/reference/android/service/notification/NotificationListenerService) 只能返回系统提供给监听器的通知；[Android 15 的敏感通知保护](https://developer.android.com/about/versions/15/behavior-changes-all#otp-redaction) 也可能隐去验证码。持续回查不会绕过这些限制。
 
 ## 5. 点击填写没有反应
 

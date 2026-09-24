@@ -54,7 +54,7 @@ class BridgeSocketServer(
     private val scheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
         Thread(runnable, "bridge-heartbeat").apply { isDaemon = true }
     }
-    private val recentFingerprints = ConcurrentHashMap<String, Long>()
+    private val deliveryHistory = OtpDeliveryHistory()
     private val stateLock = Any()
     private var activeClient: WebSocket? = null
     private var activeArm: ArmSession? = null
@@ -141,14 +141,12 @@ class BridgeSocketServer(
         if (connection?.isOpen == true && arm != null && arm.expiresAt > now) arm else null
     }
 
-    fun markFingerprintIfNew(fingerprint: String, now: Long): Boolean {
-        val previous = recentFingerprints.put(fingerprint, now)
-        recentFingerprints.entries.removeIf { now - it.value > DEDUPE_WINDOW_MS }
-        return previous == null || now - previous > DEDUPE_WINDOW_MS
+    fun markFingerprintIfNew(fingerprint: String, arm: ArmSession): Boolean = synchronized(stateLock) {
+        activeArm?.requestId == arm.requestId && deliveryHistory.mark(arm.requestId, fingerprint)
     }
 
-    fun releaseFingerprint(fingerprint: String, markedAt: Long) {
-        recentFingerprints.remove(fingerprint, markedAt)
+    fun releaseFingerprint(fingerprint: String, arm: ArmSession) = synchronized(stateLock) {
+        deliveryHistory.release(arm.requestId, fingerprint)
     }
 
     fun deliverOtp(
@@ -160,7 +158,7 @@ class BridgeSocketServer(
         sourceAppLabel: String
     ): Boolean = synchronized(stateLock) {
         val connection = activeClient ?: return false
-        if (!connection.isOpen || activeArm?.requestId != arm.requestId || arm.expiresAt <= receivedAt) return false
+        if (!connection.isOpen || activeArm?.requestId != arm.requestId || arm.expiresAt <= System.currentTimeMillis()) return false
         if (deliveredForArm >= MAX_OTP_PER_ARM) return false
 
         val messageId = UUID.randomUUID().toString()
@@ -353,6 +351,7 @@ class BridgeSocketServer(
                 val now = System.currentTimeMillis()
                 if (activeArm?.expiresAt?.let { it <= now } == true) {
                     activeArm = null
+                    deliveryHistory.clear()
                     pendingOtp = null
                     deliveredForArm = 0
                 }
@@ -399,19 +398,21 @@ class BridgeSocketServer(
             }
         }.ifEmpty { (4..8).toSet() }
         val arm = ArmSession(requestId, createdAt, expiresAt, digits, payload.optString("siteLabel").take(80))
-        val isNewRequest = synchronized(stateLock) {
+        synchronized(stateLock) {
             val sameRequest = activeArm?.requestId == arm.requestId
             activeClient = connection
             activeArm = arm
+            deliveryHistory.begin(arm.requestId)
             if (!sameRequest) {
                 pendingOtp = null
                 deliveredForArm = 0
             }
-            !sameRequest
         }
         sendEncrypted(connection, "ACK", JSONObject().put("kind", "ARMED").put("requestId", requestId))
         onStateChanged("正在等待验证码")
-        if (isNewRequest) onArmActivated(arm)
+        // The same request is re-armed after reconnecting. Its recovery loop may
+        // have stopped while offline, so always restart it (without duplicates).
+        onArmActivated(arm)
     }
 
     private fun handleCancel(connection: WebSocket, payload: JSONObject) {
@@ -419,6 +420,7 @@ class BridgeSocketServer(
         synchronized(stateLock) {
             if (activeClient == connection && activeArm?.requestId == requestId) {
                 activeArm = null
+                deliveryHistory.clear()
                 pendingOtp = null
                 deliveredForArm = 0
             }
@@ -511,6 +513,7 @@ class BridgeSocketServer(
         synchronized(stateLock) {
             if (activeArm?.expiresAt?.let { it <= now } == true) {
                 activeArm = null
+                deliveryHistory.clear()
                 pendingOtp = null
                 deliveredForArm = 0
                 onStateChanged("等待已超时")
@@ -518,7 +521,6 @@ class BridgeSocketServer(
             if (pendingOtp?.expiresAt?.let { it <= now } == true) pendingOtp = null
         }
         retryPendingOtp()
-        recentFingerprints.entries.removeIf { now - it.value > DEDUPE_WINDOW_MS }
     }
 
     private fun constantTimeTextEquals(left: String, right: String): Boolean = CryptoBox.constantTimeEquals(
@@ -530,7 +532,6 @@ class BridgeSocketServer(
         const val PATH = "/v1/bridge"
         private const val MAX_MESSAGE_SIZE = 32 * 1024
         private const val ARM_MAX_MS = 5 * 60 * 1000L
-        private const val DEDUPE_WINDOW_MS = 60 * 1000L
         private const val CLOCK_TOLERANCE_MS = 2 * 60 * 1000L
         private const val PAIR_LOCK_MS = 5 * 60 * 1000L
         private const val HEARTBEAT_MS = 20 * 1000L
