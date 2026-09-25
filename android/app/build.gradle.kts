@@ -12,8 +12,8 @@ android {
         applicationId = "io.github.zydwz2001.wifiotprelay"
         minSdk = 26
         targetSdk = 35
-        versionCode = 37
-        versionName = "2.2.6"
+        versionCode = 39
+        versionName = "2.3.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -40,4 +40,5 @@ dependencies {
     implementation("org.jmdns:jmdns:3.6.3")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

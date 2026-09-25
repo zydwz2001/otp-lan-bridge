@@ -40,15 +40,17 @@ it("opens phone and pairing settings inside the floating panel", async () => {
         }
       };
     }
-    if (message.type === "INLINE_SAVE_ADDRESS") {
+    if (message.type === "INLINE_SAVE_ADDRESS" || message.type === "PAIR") {
       savedHost = String(message.host ?? "");
       savedPort = Number(message.port);
     }
     if (message.type === "PAIR") paired = true;
+    if (message.type === "PREPARE_CONNECTION") return { ok: true, ready: paired };
     return { ok: true };
   });
   vi.stubGlobal("chrome", {
     runtime: {
+      id: "test-id",
       onMessage: {
         addListener: vi.fn((listener: (message: Record<string, unknown>) => unknown) => runtimeListeners.add(listener)),
         removeListener: vi.fn((listener: (message: Record<string, unknown>) => unknown) => runtimeListeners.delete(listener))
@@ -184,4 +186,8 @@ it("opens phone and pairing settings inside the floating panel", async () => {
   const staleContextInput = document.createElement("input");
   document.body.append(staleContextInput);
   expect(() => staleContextInput.dispatchEvent(new FocusEvent("focusin", { bubbles: true }))).not.toThrow();
+  expect(shadow!.querySelector(".status")?.textContent).toBe("页面待刷新");
+  expect(shadow!.querySelector(".dot")?.getAttribute("data-state")).toBe("offline");
+  expect(shadow!.querySelector(".error")?.textContent).toBe("插件已更新或重载，请刷新当前网页后继续");
+  expect(shadow!.querySelector(".code")).toBeNull();
 });

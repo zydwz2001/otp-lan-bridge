@@ -1,7 +1,7 @@
 {
   "name": "verification-code-transfer-extension",
   "private": true,
-  "version": "2.2.5",
+  "version": "2.3.3",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -11,9 +11,15 @@
   },
   "devDependencies": {
     "@types/chrome": "^0.0.305",
+    "@types/w3c-web-usb": "1.0.14",
     "esbuild": "^0.25.0",
     "jsdom": "^26.0.0",
     "typescript": "^5.7.3",
     "vitest": "^3.0.5"
+  },
+  "dependencies": {
+    "@yume-chan/adb": "2.6.4",
+    "@yume-chan/adb-credential-web": "2.1.0",
+    "@yume-chan/adb-daemon-webusb": "2.3.2"
   }
 }

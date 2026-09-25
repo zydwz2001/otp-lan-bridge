@@ -12,6 +12,8 @@ import {
 } from "./crypto";
 import { findVerifiedCandidate, pairedDeviceHostname, sameSubnetCandidates } from "./discovery";
 import { orderedFrameIds } from "./frame-targets";
+import type { BridgeSocket } from "./bridge-transport";
+import { onUsbDevicesChanged, openUsbSocket, usbDeviceKeys } from "./usb-bridge";
 import {
   DEFAULT_CONFIG,
   DEFAULT_RUNTIME_STATE,
@@ -31,7 +33,7 @@ const RECONNECT_ALARM = "wifi-relay-reconnect";
 const MIN_ALARM_DELAY_MINUTES = 0.5;
 const ARM_TTL_MS = 5 * 60 * 1000;
 const CLOCK_TOLERANCE_MS = 2 * 60 * 1000;
-const LOCAL_NETWORK_PROBE_TTL_MS = 45 * 1000;
+const LOCAL_NETWORK_PROBE_TTL_MS = 3 * 60 * 1000;
 const ADDRESS_DISCOVERY_INTERVAL_MS = 5 * 60 * 1000;
 const BRIDGE_CONNECT_TIMEOUT_MS = 8_000;
 const MDNS_ADDRESS_PROBE_TIMEOUT_MS = 8_000;
@@ -49,12 +51,19 @@ interface LocalNetworkProbePermit {
   permissionWindowId?: number;
   permissionTabId?: number;
   claimed?: boolean;
+  usbProbeStarted?: boolean;
   expiresAt: number;
 }
 
 let config: ExtensionConfig = { ...DEFAULT_CONFIG };
 let state: BridgeRuntimeState = { ...DEFAULT_RUNTIME_STATE };
-let socket: WebSocket | null = null;
+let socket: BridgeSocket | null = null;
+let selectingConnection = false;
+let receiveQueue: Promise<void> = Promise.resolve();
+let usbUpgrade: Promise<void> | undefined;
+let usbRetryAfter = 0;
+let lastServerSeenAt = 0;
+let preparedUsb: { socket: BridgeSocket; key: string; tabId: number; timer: ReturnType<typeof setTimeout> } | undefined;
 let socketGeneration = 0;
 let sessionKey: Uint8Array | null = null;
 let sessionId = "";
@@ -75,6 +84,13 @@ const localNetworkProbePermits = new Map<string, LocalNetworkProbePermit>();
 let initialization: Promise<void> | null = null;
 
 void ensureInitialized();
+onUsbDevicesChanged(() => {
+  usbRetryAfter = 0;
+  void ensureInitialized().then(() => {
+    if (state.connection === "online") tryUsbUpgrade();
+    else ensureBridgeConnection();
+  });
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   void ensureInitialized();
@@ -90,8 +106,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   focusedTargets.delete(tabId);
+  if (preparedUsb?.tabId === tabId) clearPreparedUsb();
   for (const [token, permit] of localNetworkProbePermits) {
     if (permit.tabId === tabId) localNetworkProbePermits.delete(token);
+    else if (permit.permissionTabId === tabId) {
+      localNetworkProbePermits.delete(token);
+      void sendLocalNetworkProbeResult(permit.tabId, token, false, "授权窗口已关闭，请重新点击配对");
+    }
   }
   if (state.armedTabId === tabId) void cancelWait("标签页已关闭");
 });
@@ -141,10 +162,11 @@ async function runMaintenance(): Promise<void> {
   await ensureInitialized();
   await evaluateExpiry();
   ensureBridgeConnection();
+  if (state.connection === "online") tryUsbUpgrade();
 }
 
 function ensureBridgeConnection(): void {
-  if (!config.pairingKey || !config.deviceId || !config.host) return;
+  if (!config.pairingKey || !config.deviceId || selectingConnection) return;
   if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
   connectBridge();
 }
@@ -295,6 +317,7 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
     case "INLINE_SAVE_ADDRESS": {
       const host = String(message.host ?? "").trim();
       const port = Number(message.port);
+      if (socket?.transport === "usb" || preparedUsb?.tabId === sender.tab?.id) return { config: publicConfig() };
       validateHostAndPort(host, port);
       const addressChanged = host !== config.host || port !== config.port;
       config.host = host;
@@ -304,6 +327,27 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       await broadcastState();
       return { config: publicConfig() };
     }
+    case "PREPARE_CONNECTION": {
+      const tabId = requireTab(sender);
+      if (sender.frameId !== 0) throw new Error("只允许从验证码传递主面板连接");
+      if (config.pairingKey) {
+        if (socket?.transport === "usb" && state.connection === "online") return { ready: true };
+        const candidate = await findUsbBridge();
+        if (candidate) {
+          holdPreparedUsb(candidate, tabId);
+          return { ready: true };
+        }
+      } else {
+        const keys = await usbDeviceKeys();
+        if (keys.length === 1) {
+          try {
+            holdPreparedUsb(await openUsbSocket(keys[0]!), tabId);
+            return { ready: true };
+          } catch { /* The existing permission window handles first-use authorization. */ }
+        }
+      }
+      return { ready: false };
+    }
     case "AUTHORIZE_LOCAL_NETWORK_PROBE": {
       const tabId = requireTab(sender);
       if (sender.frameId !== 0) throw new Error("只允许从验证码传递主面板请求本地网络权限");
@@ -311,13 +355,14 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       const host = String(message.host ?? "").trim();
       const port = Number(message.port);
       if (!/^[0-9a-f-]{36}$/i.test(token)) throw new Error("本地网络授权票据无效");
-      validateHostAndPort(host, port);
       pruneLocalNetworkProbePermits();
       const permit: LocalNetworkProbePermit = { host, port, tabId, expiresAt: Date.now() + LOCAL_NETWORK_PROBE_TTL_MS };
       localNetworkProbePermits.set(token, permit);
       const permissionWindow = await chrome.windows.create({
         url: chrome.runtime.getURL(`pair-permission.html#${encodeURIComponent(token)}`),
-        type: "popup",
+        // Chrome anchors extension device choosers to the extensions toolbar.
+        // A popup has no toolbar and silently dismisses requestDevice.
+        type: "normal",
         width: 420,
         height: 310,
         focused: true
@@ -343,6 +388,29 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       permit.claimed = true;
       return { host: permit.host, port: permit.port };
     }
+    case "PROBE_USB_CONNECTION": {
+      const permit = requireConnectionPermit(message, sender);
+      if (permit.usbProbeStarted) throw new Error("连接授权已使用");
+      permit.usbProbeStarted = true;
+      const key = String(message.deviceKey ?? "");
+      if (!(await usbDeviceKeys()).includes(key)) throw new Error("手机未授权或已断开");
+      const candidate = await openUsbSocket(key, 45_000);
+      if (!localNetworkProbePermits.has(String(message.token)) || permit.expiresAt < Date.now()) {
+        candidate.close();
+        throw new Error("连接授权已失效");
+      }
+      if (config.pairingKey && !(await verifyBridgeSocket(candidate))) {
+        throw new Error("连接的手机与已配对设备不一致");
+      }
+      const prepared = config.pairingKey ? await openUsbSocket(key) : candidate;
+      if (localNetworkProbePermits.get(String(message.token)) !== permit || permit.expiresAt < Date.now()) {
+        prepared.close();
+        throw new Error("连接授权已失效");
+      }
+      holdPreparedUsb(prepared, permit.tabId);
+      usbRetryAfter = 0;
+      return {};
+    }
     case "LOCAL_NETWORK_PROBE_RESULT": {
       const senderUrl = sender.url?.replace(/[?#].*$/, "");
       if (sender.id !== chrome.runtime.id || senderUrl !== chrome.runtime.getURL("pair-permission.html")) {
@@ -350,15 +418,16 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       }
       const token = String(message.token ?? "");
       const permit = localNetworkProbePermits.get(token);
-      if (!permit || !permit.claimed || sender.tab?.id !== permit.permissionTabId) {
+      if (!permit || !permit.claimed || permit.expiresAt < Date.now() || sender.tab?.id !== permit.permissionTabId) {
         throw new Error("本地网络授权结果无效");
       }
       localNetworkProbePermits.delete(token);
       const ok = message.probeOk === true;
       const error = ok ? undefined : String(message.probeError ?? "浏览器未允许访问手机");
       await sendLocalNetworkProbeResult(permit.tabId, token, ok, error);
-      if (ok && permit.permissionWindowId !== undefined) {
-        try { await chrome.windows.remove(permit.permissionWindowId); } catch { /* window already closed */ }
+      if (ok && permit.permissionTabId !== undefined) {
+        // A normal window can contain additional user tabs. Close only our page.
+        try { await chrome.tabs.remove(permit.permissionTabId); } catch { /* tab already closed */ }
       }
       return {};
     }
@@ -366,10 +435,11 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       const host = String(message.host ?? "").trim();
       const port = Number(message.port);
       const pairCode = String(message.pairCode ?? "").trim();
-      validateHostAndPort(host, port);
       if (!/^\d{6}$/.test(pairCode)) throw new Error("请输入手机上显示的 6 位配对码");
       if (config.pairingKey) throw new Error("请先解除现有配对");
-      await pairDevice(host, port, pairCode);
+      const prepared = takePreparedUsb(requireTab(sender));
+      if (!prepared) validateHostAndPort(host, port);
+      await pairDevice(host, port, pairCode, prepared);
       return { config: publicConfig() };
     }
     case "UNPAIR": {
@@ -378,26 +448,26 @@ async function handleMessage(message: Record<string, unknown>, sender: chrome.ru
       config.port = 0;
       config.deviceId = undefined;
       config.pairingKey = undefined;
+      config.usbDeviceKey = undefined;
+      clearPreparedUsb();
       await saveConfig();
       await clearWait("IDLE");
       await updateState({ connection: "unpaired", notificationAccess: undefined });
       return {};
     }
     case "RECONNECT":
-      connectBridge();
+      connectBridge(undefined, takePreparedUsb(requireTab(sender)));
       return {};
     default:
       throw new Error("不支持的扩展消息");
   }
 }
 
-async function pairDevice(host: string, port: number, pairCode: string): Promise<void> {
+async function pairDevice(host: string, port: number, pairCode: string, prepared?: BridgeSocket): Promise<void> {
   const keyPair = await generatePairingKeyPair();
   const clientPublicKey = await exportPublicKey(keyPair.publicKey);
-  const url = bridgeUrl(host, port);
-
   const response = await new Promise<Record<string, unknown>>((resolve, reject) => {
-    const pairSocket = new WebSocket(url);
+    const pairSocket: BridgeSocket = prepared ?? new WebSocket(bridgeUrl(host, port));
     const timeout = setTimeout(() => {
       pairSocket.close();
       reject(new Error("手机服务未响应，请在 App 中先停止传递，再重新开始传递后重试"));
@@ -423,6 +493,11 @@ async function pairDevice(host: string, port: number, pairCode: string): Promise
       clearTimeout(timeout);
       reject(new Error("无法连接手机，请检查 IP、端口和同一 Wi-Fi"));
     };
+    pairSocket.onclose = () => {
+      clearTimeout(timeout);
+      reject(new Error("手机连接已断开，请重新配对"));
+    };
+    pairSocket.start?.();
   });
 
   const deviceId = String(response.deviceId ?? "");
@@ -433,8 +508,11 @@ async function pairDevice(host: string, port: number, pairCode: string): Promise
   const transcript = `${clientPublicKey}|${serverPublicKey}|${deviceId}|${config.clientId}`;
   if (!(await verifyHmac(pairingKey, transcript, proof))) throw new Error("配对指纹验证失败");
 
-  config.host = host;
-  config.port = port;
+  if (prepared?.transport === "usb") config.usbDeviceKey = prepared.deviceKey;
+  else {
+    config.host = host;
+    config.port = port;
+  }
   config.deviceId = deviceId;
   config.pairingKey = bytesToBase64(pairingKey);
   await saveConfig();
@@ -442,26 +520,138 @@ async function pairDevice(host: string, port: number, pairCode: string): Promise
   connectBridge();
 }
 
-function connectBridge(hostOverride?: string): void {
+function requireConnectionPermit(message: Record<string, unknown>, sender: chrome.runtime.MessageSender): LocalNetworkProbePermit {
+  if (sender.id !== chrome.runtime.id || sender.url?.replace(/[?#].*$/, "") !== chrome.runtime.getURL("pair-permission.html")) {
+    throw new Error("连接授权来源无效");
+  }
+  const permit = localNetworkProbePermits.get(String(message.token ?? ""));
+  if (!permit?.claimed || permit.expiresAt < Date.now() || sender.tab?.id !== permit.permissionTabId) {
+    throw new Error("连接授权已失效");
+  }
+  return permit;
+}
+
+function clearPreparedUsb(): void {
+  if (!preparedUsb) return;
+  clearTimeout(preparedUsb.timer);
+  preparedUsb.socket.close();
+  preparedUsb = undefined;
+}
+
+function holdPreparedUsb(candidate: BridgeSocket, tabId: number): void {
+  clearPreparedUsb();
+  preparedUsb = {
+    socket: candidate,
+    key: candidate.deviceKey!,
+    tabId,
+    timer: setTimeout(clearPreparedUsb, 45_000)
+  };
+}
+
+function takePreparedUsb(tabId: number): BridgeSocket | undefined {
+  if (preparedUsb?.tabId !== tabId) return undefined;
+  const prepared = preparedUsb;
+  preparedUsb = undefined;
+  clearTimeout(prepared.timer);
+  return prepared.socket;
+}
+
+async function findUsbBridge(): Promise<BridgeSocket | undefined> {
+  if (Date.now() < usbRetryAfter) return undefined;
+  const keys = await usbDeviceKeys();
+  keys.sort((a, b) => Number(b === config.usbDeviceKey) - Number(a === config.usbDeviceKey));
+  for (const key of keys.slice(0, 4)) {
+    try {
+      const candidate = await openUsbSocket(key);
+      if (await verifyBridgeSocket(candidate)) return await openUsbSocket(key);
+    } catch { /* An unavailable USB interface must not prevent Wi-Fi recovery. */ }
+  }
+  if (keys.length) usbRetryAfter = Date.now() + 30_000;
+  return undefined;
+}
+
+function verifyBridgeSocket(candidate: BridgeSocket): Promise<boolean> {
+  const deviceId = config.deviceId;
+  const clientId = config.clientId;
+  const pairingKey = config.pairingKey;
+  if (!deviceId || !pairingKey) { candidate.close(); return Promise.resolve(false); }
+  return new Promise((resolve) => {
+    let finished = false;
+    const nonce = randomBase64(16);
+    const finish = (ok: boolean): void => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      candidate.onclose = null;
+      candidate.close();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), 4_000);
+    candidate.onopen = () => candidate.send(JSON.stringify({
+      v: 1, type: "AUTH_INIT", deviceId, clientId, clientNonce: nonce, timestamp: Date.now()
+    }));
+    candidate.onmessage = (event) => {
+      void (async () => {
+        try {
+          const message = JSON.parse(String(event.data)) as Record<string, unknown>;
+          if (message.type !== "AUTH_CHALLENGE" || message.deviceId !== deviceId) return finish(false);
+          const transcript = `${deviceId}|${clientId}|${String(message.sessionId)}|${nonce}|${String(message.serverNonce)}`;
+          finish(await verifyHmac(base64ToBytes(pairingKey), transcript, String(message.proof)));
+        } catch { finish(false); }
+      })();
+    };
+    candidate.onerror = () => finish(false);
+    candidate.onclose = () => finish(false);
+    candidate.start?.();
+  });
+}
+
+function tryUsbUpgrade(): void {
+  if (usbUpgrade || selectingConnection || socket?.transport === "usb" || !config.pairingKey) return;
+  const generation = socketGeneration;
+  usbUpgrade = (async () => {
+    const candidate = await findUsbBridge();
+    if (!candidate) return;
+    if (generation !== socketGeneration) { candidate.close(); return; }
+    connectBridge(undefined, candidate);
+  })().catch(() => undefined).finally(() => { usbUpgrade = undefined; });
+}
+
+function connectBridge(hostOverride?: string, prepared?: BridgeSocket): void {
+  const generation = ++socketGeneration;
   disconnectBridge(false);
-  if (!config.pairingKey || !config.deviceId || !config.host) {
+  if (!config.pairingKey || !config.deviceId) {
+    prepared?.close();
     void updateState({ connection: "unpaired" });
     return;
   }
-
-  const generation = ++socketGeneration;
-  const targetHost = hostOverride ?? config.host;
+  selectingConnection = true;
   void updateState({ connection: "connecting", error: undefined });
-  try {
-    socket = new WebSocket(bridgeUrl(targetHost, config.port, config.deviceId));
-  } catch {
-    handleDisconnect(generation, "手机地址无效");
-    return;
-  }
+  void (async () => {
+    const candidate = prepared ?? await findUsbBridge();
+    if (generation !== socketGeneration) { candidate?.close(); return; }
+    selectingConnection = false;
+    try {
+      socket = candidate ?? new WebSocket(bridgeUrl(hostOverride ?? config.host, config.port, config.deviceId));
+      attachBridgeSocket(generation);
+    } catch {
+      handleDisconnect(generation, "手机未连接，请检查手机端是否已经开始传递");
+    }
+  })().catch(() => {
+    if (generation !== socketGeneration) return;
+    selectingConnection = false;
+    handleDisconnect(generation, "手机未连接，请重新连接");
+  });
+}
+
+function attachBridgeSocket(generation: number): void {
+  if (!socket) return;
+  const connectedSocket = socket;
 
   connectionTimeoutTimer = setTimeout(() => {
     if (generation !== socketGeneration || !socket) return;
     const timedOutSocket = socket;
+    if (timedOutSocket.transport === "usb") usbRetryAfter = Date.now() + 30_000;
     socket = null;
     timedOutSocket.onopen = null;
     timedOutSocket.onmessage = null;
@@ -485,15 +675,21 @@ function connectBridge(hostOverride?: string): void {
   };
   socket.onmessage = (event) => {
     if (generation !== socketGeneration) return;
-    void handleSocketMessage(String(event.data)).catch((error: unknown) => {
+    receiveQueue = receiveQueue.then(async () => {
+      if (generation === socketGeneration) await handleSocketMessage(String(event.data), generation);
+    }).catch((error: unknown) => {
       if (generation === socketGeneration) {
         void updateState({ error: safeError(error) });
-        socket?.close(1008, "protocol error");
+        connectedSocket.close(1008, "protocol error");
       }
     });
   };
   socket.onerror = () => { /* onclose owns retry and user-facing state */ };
-  socket.onclose = () => handleDisconnect(generation, "手机未连接，请检查手机端是否已经开始传递");
+  socket.onclose = () => {
+    if (generation === socketGeneration && connectedSocket.transport === "usb") usbRetryAfter = Date.now() + 5_000;
+    handleDisconnect(generation, "手机未连接，请检查手机端是否已经开始传递");
+  };
+  socket.start?.();
 }
 
 function disconnectBridge(incrementGeneration = true): void {
@@ -509,16 +705,27 @@ function disconnectBridge(incrementGeneration = true): void {
   confirmedArmRequestId = "";
   const current = socket;
   socket = null;
+  if (current) {
+    current.onopen = null;
+    current.onmessage = null;
+    current.onerror = null;
+    current.onclose = null;
+  }
   current?.close(1000, "reconnect");
   sessionKey = null;
   sessionId = "";
   incomingSeq = 0;
   outgoingSeq = 0;
   sendQueue = Promise.resolve();
+  receiveQueue = Promise.resolve();
+  selectingConnection = false;
 }
 
 function handleDisconnect(generation: number, message: string): void {
   if (generation !== socketGeneration) return;
+  const recoveryGeneration = ++socketGeneration;
+  selectingConnection = false;
+  const wasUsb = socket?.transport === "usb";
   if (connectionTimeoutTimer) clearTimeout(connectionTimeoutTimer);
   connectionTimeoutTimer = undefined;
   socket = null;
@@ -531,9 +738,13 @@ function handleDisconnect(generation: number, message: string): void {
   const waitState = state.waitState === "ARMED" ? "ARMED_OFFLINE" : state.waitState;
   void updateState({ connection: config.pairingKey ? "offline" : "unpaired", waitState, error: message });
   if (!config.pairingKey) return;
+  if (wasUsb) {
+    scheduleReconnect();
+    return;
+  }
   scheduleReconnectWake(reconnectDelay);
   if (canDiscoverAddress()) {
-    startAddressDiscovery(generation);
+    startAddressDiscovery(recoveryGeneration);
     return;
   }
   scheduleReconnect();
@@ -711,10 +922,10 @@ function probePairedPhone(
   });
 }
 
-async function handleSocketMessage(raw: string): Promise<void> {
+async function handleSocketMessage(raw: string, generation: number): Promise<void> {
   const message = JSON.parse(raw) as Record<string, unknown>;
   if (!message.ciphertext) {
-    await handleHandshakeMessage(message);
+    await handleHandshakeMessage(message, generation);
     return;
   }
   if (!sessionKey || !sessionId || message.deviceId !== config.deviceId || message.sessionId !== sessionId) {
@@ -725,36 +936,57 @@ async function handleSocketMessage(raw: string): Promise<void> {
     throw new Error("已拒绝过期或重复消息");
   }
   const payload = await decryptEnvelope(envelope, sessionKey);
+  if (generation !== socketGeneration) return;
   incomingSeq = envelope.seq;
+  lastServerSeenAt = Date.now();
+  if (state.connection !== "online") {
+    if (envelope.type !== "ACK" || (payload as Record<string, unknown>).kind !== "STATUS") throw new Error("手机认证未完成");
+    await finishAuthentication(generation);
+    if (generation !== socketGeneration) return;
+  }
   await handleBusinessMessage(envelope.type, payload);
 }
 
-async function handleHandshakeMessage(message: Record<string, unknown>): Promise<void> {
+async function handleHandshakeMessage(message: Record<string, unknown>, generation: number): Promise<void> {
   if (message.type === "ERROR") throw new Error(String(message.message ?? "手机认证失败"));
   if (message.type !== "AUTH_CHALLENGE" || !config.pairingKey || !config.deviceId) return;
   const returnedSessionId = String(message.sessionId ?? "");
   const serverNonce = String(message.serverNonce ?? "");
   const proof = String(message.proof ?? "");
+  if (message.deviceId !== config.deviceId || !returnedSessionId || !serverNonce || sessionKey) throw new Error("手机身份验证失败");
   const pairingKey = base64ToBytes(config.pairingKey);
   const transcript = `${config.deviceId}|${config.clientId}|${returnedSessionId}|${clientNonce}|${serverNonce}`;
   if (!(await verifyHmac(pairingKey, transcript, proof))) throw new Error("手机身份验证失败");
-
+  const derivedKey = await deriveSessionKey(pairingKey, clientNonce, serverNonce, returnedSessionId);
+  if (generation !== socketGeneration) return;
   sessionId = returnedSessionId;
-  sessionKey = await deriveSessionKey(pairingKey, clientNonce, serverNonce, sessionId);
+  sessionKey = derivedKey;
   incomingSeq = 0;
   outgoingSeq = 0;
+  await sendEncrypted("ACK", { kind: "AUTH_OK" });
+}
+
+async function finishAuthentication(generation: number): Promise<void> {
   reconnectDelay = 1_000;
   void chrome.alarms.clear(RECONNECT_ALARM);
   lastAddressDiscoveryAt = 0;
   if (connectionTimeoutTimer) clearTimeout(connectionTimeoutTimer);
   connectionTimeoutTimer = undefined;
-  await sendEncrypted("ACK", { kind: "AUTH_OK" });
+  if (socket?.transport === "usb" && config.usbDeviceKey !== socket.deviceKey) {
+    config.usbDeviceKey = socket.deviceKey;
+    await saveConfig();
+    if (generation !== socketGeneration) return;
+  }
   await updateState({
     connection: "online",
     waitState: state.waitState === "ARMED_OFFLINE" ? "ARMED" : state.waitState,
     error: undefined
   });
-  heartbeatTimer = setInterval(() => { void sendEncrypted("PING", { at: Date.now() }); }, 20_000);
+  if (generation !== socketGeneration) return;
+  heartbeatTimer = setInterval(() => {
+    if (Date.now() - lastServerSeenAt > 55_000) socket?.close(1001, "Heartbeat timeout");
+    else void sendEncrypted("PING", { at: Date.now() });
+  }, 20_000);
 
   if ((state.waitState === "ARMED" || state.waitState === "ARMED_OFFLINE") && validArmFromState()) {
     confirmedArmRequestId = "";
@@ -772,8 +1004,11 @@ async function handleBusinessMessage(type: Envelope["type"], payload: Record<str
   if (type === "ACK") {
     if (payload.kind === "STATUS") {
       const advertisedHost = String(payload.hostAddress ?? "");
-      if (isPrivateWifiIpv4(advertisedHost) && advertisedHost !== config.host) {
+      const advertisedPort = Number(payload.port);
+      if (isPrivateWifiIpv4(advertisedHost) && (advertisedHost !== config.host ||
+          (Number.isInteger(advertisedPort) && advertisedPort >= 1024 && advertisedPort <= 65535 && advertisedPort !== config.port))) {
         config.host = advertisedHost;
+        if (Number.isInteger(advertisedPort) && advertisedPort >= 1024 && advertisedPort <= 65535) config.port = advertisedPort;
         await saveConfig();
       }
       await updateState({ notificationAccess: Boolean(payload.notificationAccess) });
@@ -827,15 +1062,18 @@ async function handleBusinessMessage(type: Envelope["type"], payload: Record<str
 }
 
 function sendEncrypted(type: Envelope["type"], payload: unknown): Promise<void> {
+  const generation = socketGeneration;
   sendQueue = sendQueue.then(async () => {
+    if (generation !== socketGeneration) return;
     if (!socket || socket.readyState !== WebSocket.OPEN || !sessionKey || !sessionId || !config.deviceId) {
       throw new Error("手机当前离线");
     }
     outgoingSeq += 1;
     const envelope = await encryptEnvelope(type, config.deviceId, sessionId, outgoingSeq, Date.now(), payload, sessionKey);
+    if (generation !== socketGeneration) return;
     socket.send(JSON.stringify(envelope));
   }).catch((error: unknown) => {
-    void updateState({ error: safeError(error) });
+    if (generation === socketGeneration) void updateState({ error: safeError(error) });
   });
   return sendQueue;
 }

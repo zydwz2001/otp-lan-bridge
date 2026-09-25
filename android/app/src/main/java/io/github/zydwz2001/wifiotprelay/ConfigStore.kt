@@ -15,10 +15,10 @@ import javax.crypto.spec.GCMParameterSpec
 data class PairingRecord(val deviceId: String, val clientId: String, val key: ByteArray)
 
 @SuppressLint("ApplySharedPref") // Pairing changes must be durable before a success response is sent.
-class ConfigStore(context: Context) {
+class ConfigStore(context: Context) : BridgePairingStore {
     private val preferences = context.getSharedPreferences("wifi_relay_config", Context.MODE_PRIVATE)
 
-    var port: Int
+    override var port: Int
         get() = preferences.getInt(KEY_PORT, DEFAULT_PORT)
         set(value) {
             require(value in 1024..65535)
@@ -37,7 +37,7 @@ class ConfigStore(context: Context) {
             preferences.edit().putBoolean(KEY_ENABLED, value).apply()
         }
 
-    val deviceId: String
+    override val deviceId: String
         get() {
             preferences.getString(KEY_DEVICE_ID, null)?.let { return it }
             val created = UUID.randomUUID().toString()
@@ -46,7 +46,7 @@ class ConfigStore(context: Context) {
         }
 
     @Synchronized
-    fun savePairing(clientId: String, key: ByteArray) {
+    override fun savePairing(clientId: String, key: ByteArray) {
         require(key.size == 32)
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateMasterKey())
@@ -59,7 +59,7 @@ class ConfigStore(context: Context) {
     }
 
     @Synchronized
-    fun loadPairing(): PairingRecord? {
+    override fun loadPairing(): PairingRecord? {
         val clientId = preferences.getString(KEY_CLIENT_ID, null) ?: return null
         val iv = preferences.getString(KEY_PAIR_IV, null)?.decodeBase64() ?: return null
         val encrypted = preferences.getString(KEY_PAIR_SECRET, null)?.decodeBase64() ?: return null

@@ -1,6 +1,6 @@
 package io.github.zydwz2001.wifiotprelay
 
-import android.util.Base64
+import java.util.Base64
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
@@ -22,9 +22,9 @@ object CryptoBox {
 
     fun randomBytes(size: Int): ByteArray = ByteArray(size).also(secureRandom::nextBytes)
 
-    fun encode(value: ByteArray): String = Base64.encodeToString(value, Base64.NO_WRAP)
+    fun encode(value: ByteArray): String = Base64.getEncoder().encodeToString(value)
 
-    fun decode(value: String): ByteArray = Base64.decode(value, Base64.NO_WRAP)
+    fun decode(value: String): ByteArray = Base64.getDecoder().decode(value)
 
     fun sha256(value: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(value)
 

@@ -16,7 +16,10 @@ import java.security.SecureRandom
 class BridgeCoordinator(private val context: Context) {
     val config = ConfigStore(context)
 
-    @Volatile private var server: BridgeSocketServer? = null
+    @Volatile private var server: BridgeProtocol? = null
+    @Volatile private var wifiServer: BridgeSocketServer? = null
+    @Volatile private var usbServer: BridgeUsbServer? = null
+    @Volatile private var advertisedWifiAddress: String? = null
     private val mdnsAdvertiser = BridgeMdnsAdvertiser(context)
     @Volatile private var activityVisible = false
     @Volatile private var pairCode: PairCodeState? = null
@@ -30,21 +33,9 @@ class BridgeCoordinator(private val context: Context) {
     @Synchronized
     fun startServer() {
         val address = findLanAddress()
-        if (address == null) {
-            diagnostic = "手机未连接 Wi-Fi"
-            stopServerInternal()
-            return
-        }
-        val current = server
-        if (current != null && current.hostAddress == address.hostAddress && current.listenPort == config.port) return
-
-        stopServerInternal()
-        val created = BridgeSocketServer(
-            // Bind only to the Wi-Fi interface. This edition intentionally does
-            // not expose the bridge through VPN, USB forwarding or mobile data.
-            InetSocketAddress(address, config.port),
-            address.hostAddress.orEmpty(),
-            config,
+        val protocol = server ?: BridgeProtocol(
+            hostAddressProvider = { advertisedWifiAddress.orEmpty() },
+            config = config,
             pairCodeProvider = { currentPairCode() },
             pairingAllowed = { activityVisible },
             notificationAccessProvider = { hasNotificationAccess() && OtpNotificationListener.isConnected },
@@ -55,16 +46,49 @@ class BridgeCoordinator(private val context: Context) {
                 lastCodeAt = null
             },
             onStateChanged = { diagnostic = it }
-        )
-        server = created
-        try {
-            created.start()
-            mdnsAdvertiser.start(address, config.port, config.deviceId)
-            diagnostic = "正在启动验证码传递"
-        } catch (_: Exception) {
-            mdnsAdvertiser.stop()
-            server = null
-            diagnostic = "启动失败，请重新尝试"
+        ).also { server = it }
+        if (usbServer?.isRunning != true) {
+            val usb = BridgeUsbServer(protocol)
+            try {
+                usb.start()
+                usbServer = usb
+            } catch (_: Exception) {
+                usb.stopSafely()
+                usbServer = null
+            }
+        }
+
+        // Refresh only the Wi-Fi listener. A network change must not tear down
+        // an authenticated USB session or its pending delivery history.
+        val current = wifiServer
+        if (current?.hostAddress == address?.hostAddress && current?.listenPort == config.port) return
+        mdnsAdvertiser.stop()
+        current?.stopSafely()
+        wifiServer = null
+        advertisedWifiAddress = address?.hostAddress
+        if (address != null) {
+            lateinit var wifi: BridgeSocketServer
+            wifi = BridgeSocketServer(InetSocketAddress(address, config.port), protocol) {
+                if (wifiServer === wifi) {
+                    wifiServer = null
+                    mdnsAdvertiser.stop()
+                }
+            }
+            wifiServer = wifi
+            try {
+                wifi.start()
+                mdnsAdvertiser.start(address, config.port, config.deviceId)
+            } catch (_: Exception) {
+                wifi.stopSafely()
+                wifiServer = null
+            }
+        }
+        if (protocol.isClientOnline()) {
+            // Let an existing USB client learn a newly available Wi-Fi address
+            // immediately, so unplugging can fall back without another pairing.
+            protocol.broadcastStatus()
+        } else {
+            diagnostic = "验证码传递已开始，等待电脑连接"
         }
     }
 
@@ -232,9 +256,9 @@ class BridgeCoordinator(private val context: Context) {
         }
         return BridgeSnapshot(
             enabled = config.bridgeEnabled,
-            running = activeServer != null,
+            running = usbServer?.isRunning == true || wifiServer != null,
             notificationListenerConnected = OtpNotificationListener.isConnected,
-            boundAddress = activeServer?.hostAddress,
+            boundAddress = advertisedWifiAddress,
             port = config.port,
             clientOnline = activeServer?.isClientOnline() == true,
             paired = config.loadPairing() != null,
@@ -268,8 +292,13 @@ class BridgeCoordinator(private val context: Context) {
     @Synchronized
     private fun stopServerInternal() {
         mdnsAdvertiser.stop()
+        wifiServer?.stopSafely()
+        wifiServer = null
+        usbServer?.stopSafely()
+        usbServer = null
         server?.stopSafely()
         server = null
+        advertisedWifiAddress = null
     }
 
     companion object {

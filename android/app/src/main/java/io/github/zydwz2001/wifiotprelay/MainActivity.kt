@@ -60,6 +60,7 @@ class MainActivity : Activity() {
     private lateinit var notificationButton: Button
     private lateinit var backgroundButton: Button
     private lateinit var pairingButton: Button
+    private lateinit var usbDebuggingButton: Button
     private var smsPackages: List<SmsApp> = emptyList()
     private var loadingSmsSelection = true
     private var notificationGuideShown = false
@@ -233,6 +234,21 @@ class MainActivity : Activity() {
         detailStatus = text("", 12f, MUTED).withMargins(top = 14).also(root::addView)
         recentStatus = text("最近验证码：暂无", 12f, MUTED).withMargins(top = 5).also(root::addView)
 
+        val usbGuide = card().withMargins(top = 16)
+        usbGuide.addView(text("无 Wi-Fi 使用方法", 16f, TEXT, true))
+        usbGuide.addView(text("没有 Wi-Fi，也能用数据线连接手机和电脑。", 12f, MUTED).withMargins(top = 6))
+        usbGuide.addView(text("1  在手机开启 USB 调试", 13f, TEXT, true).withMargins(top = 12))
+        usbGuide.addView(text(usbDebuggingSettingsPath(), 12f, MUTED).withMargins(top = 5))
+        usbDebuggingButton = secondaryButton("开启 USB 调试") { openUsbDebuggingSettings() }
+            .withMargins(top = 6).also(usbGuide::addView)
+        usbGuide.addView(text("2  用数据线连接电脑，手机提示时允许调试", 13f, TEXT).withMargins(top = 9))
+        usbGuide.addView(text("3  浏览器点击“连接手机”，在列表中选择手机", 13f, TEXT).withMargins(top = 9))
+        usbGuide.addView(text(
+            "先在插件设置里点“配对手机”或“重新连接”。首次仍需配对码，已配对无需重配。",
+            12f, MUTED
+        ).withMargins(top = 7))
+        root.addView(usbGuide)
+
         return ScrollView(this).apply {
             setBackgroundColor(BACKGROUND)
             clipToPadding = false
@@ -368,6 +384,13 @@ class MainActivity : Activity() {
         }
         applyCompletedIcon(notificationButton, notificationGranted)
         applyCompletedIcon(backgroundButton, isBackgroundReliabilityEnabled())
+        val usbDebugging = isUsbDebuggingEnabled()
+        usbDebuggingButton.text = when (usbDebugging) {
+            true -> "USB 调试已开启"
+            false -> "开启 USB 调试"
+            null -> "查看 USB 调试设置"
+        }
+        applyCompletedIcon(usbDebuggingButton, usbDebugging == true)
         serviceButton.text = if (snapshot.enabled) "停止传递" else "开始传递"
         restartTransferButton.visibility = if (snapshot.enabled && snapshot.paired && !snapshot.clientOnline) {
             View.VISIBLE
@@ -447,6 +470,50 @@ class MainActivity : Activity() {
         target.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_step_complete, 0, 0, 0)
         target.compoundDrawableTintList = ColorStateList.valueOf(SUCCESS)
         target.compoundDrawablePadding = dp(7)
+    }
+
+    private fun isUsbDebuggingEnabled(): Boolean? = try {
+        Settings.Global.getInt(contentResolver, Settings.Global.ADB_ENABLED, 0) == 1
+    } catch (_: Exception) {
+        // Some managed or vendor systems restrict access; never show a false checkmark.
+        null
+    }
+
+    private fun usbDebuggingSettingsPath(): String = if (isXiaomiDevice()) {
+        "设置 → 更多设置 → 开发者选项 → USB 调试"
+    } else {
+        "设置 → 系统（或更多设置）→ 开发者选项 → USB 调试"
+    }
+
+    private fun openUsbDebuggingSettings() {
+        val developerOptionsEnabled = try {
+            Settings.Global.getInt(contentResolver, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) == 1
+        } catch (_: Exception) { true }
+        if (!developerOptionsEnabled && isUsbDebuggingEnabled() != true) {
+            val enablePath = if (isXiaomiDevice()) {
+                "设置 → 我的设备 / 关于手机 → 全部参数与信息，连续点击“OS 版本”或“MIUI 版本”7 次。"
+            } else {
+                "设置 → 关于手机 → 版本号，连续点击 7 次；部分手机需先进入“软件信息”。"
+            }
+            AlertDialog.Builder(this)
+                .setTitle("先启用开发者选项")
+                .setMessage("$enablePath\n\n按系统提示完成后，返回本 App，再点“开启 USB 调试”。\n\n${usbDebuggingSettingsPath()}")
+                .setNegativeButton("稍后", null)
+                .setPositiveButton("去关于手机") { _, _ -> openUsbGuideSettings(Settings.ACTION_DEVICE_INFO_SETTINGS) }
+                .show()
+            return
+        }
+        openUsbGuideSettings(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+    }
+
+    private fun openUsbGuideSettings(action: String) {
+        for (candidate in listOf(action, Settings.ACTION_SETTINGS)) {
+            try {
+                startActivity(Intent(candidate))
+                return
+            } catch (_: Exception) { /* Try the general settings entry on vendor devices. */ }
+        }
+        Toast.makeText(this, "请手动打开：${usbDebuggingSettingsPath()}", Toast.LENGTH_LONG).show()
     }
 
     private fun isBackgroundReliabilityEnabled(): Boolean {

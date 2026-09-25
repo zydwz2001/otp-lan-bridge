@@ -8,7 +8,7 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "useDefineForClassFields": true,
-    "types": ["chrome", "vitest/globals"],
+    "types": ["chrome", "w3c-web-usb", "vitest/globals"],
     "skipLibCheck": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"]

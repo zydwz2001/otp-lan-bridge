@@ -1,20 +1,40 @@
-export {};
+import { requestUsbDevice } from "./usb-bridge";
 
 const statusElement = document.getElementById("status");
 const continueButton = document.getElementById("continue") as HTMLButtonElement | null;
 const token = decodeURIComponent(location.hash.slice(1));
+let claim: Record<string, unknown> | undefined;
+if (continueButton) continueButton.disabled = true;
+// Claim before the click so requestDevice runs within the actual user gesture.
+void chrome.runtime.sendMessage({ type: "CLAIM_LOCAL_NETWORK_PROBE", token }).then((result) => {
+  claim = result;
+  if (!token || !claim?.ok) return finish(false, String(claim?.error ?? "连接授权已失效，请重新配对"));
+  if (continueButton) continueButton.disabled = false;
+}).catch(() => finish(false, "连接授权已失效，请重新配对"));
+
 continueButton?.addEventListener("click", () => {
+  if (!claim?.ok) return;
   continueButton.disabled = true;
   continueButton.textContent = "正在连接…";
-  void requestPermission();
+  // Only this extension-owned page requests USB access, never a website's content script.
+  const selected = requestUsbDevice();
+  void selected.catch((error: unknown) => {
+    // Only cancellation means "continue over Wi-Fi". Browser permission or
+    // policy errors must not be hidden behind a misleading network timeout.
+    if (error && typeof error === "object" && "name" in error && error.name === "NotFoundError") return undefined;
+    throw new Error("浏览器未允许设备连接，请检查浏览器的设备权限后重试");
+  }).then(async (deviceKey) => {
+    if (deviceKey) {
+      const result = await chrome.runtime.sendMessage({ type: "PROBE_USB_CONNECTION", token, deviceKey });
+      await finish(result?.ok === true, result?.error);
+    } else {
+      await requestPermission();
+    }
+  }).catch((error: unknown) => finish(false, error instanceof Error ? error.message : "无法连接手机，请确认手机已授权当前电脑且已开始传递"));
 }, { once: true });
 
 async function requestPermission(): Promise<void> {
-  if (!token) return finish(false, "授权请求无效，请关闭窗口后重新配对");
-  const claim = await chrome.runtime.sendMessage({ type: "CLAIM_LOCAL_NETWORK_PROBE", token }) as Record<string, unknown> | undefined;
-  if (!claim?.ok) {
-    return finish(false, String(claim?.error ?? "本地网络授权已失效，请重新点击配对"));
-  }
+  if (!claim?.ok) return;
   const host = String(claim.host ?? "").trim();
   const port = Number(claim.port);
   if (!isPrivateIpv4(host) || !Number.isInteger(port) || port < 1024 || port > 65535) {

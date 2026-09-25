@@ -8,6 +8,9 @@ const policyUrl = effectivePolicyUrl();
 const PANEL_WIDTH = 244;
 const COLLAPSED_WIDTH = 132;
 const DEFAULT_TOP = 8;
+const PAGE_REFRESH_MESSAGE = "插件已更新或重载，请刷新当前网页后继续";
+let contextInvalidated = false;
+const contextInvalidationHandlers = new Set<() => void>();
 
 interface InlineSettingsConfig {
   clientId: string;
@@ -20,6 +23,7 @@ interface InlineSettingsConfig {
 void initialize();
 
 chrome.runtime.onMessage.addListener((message: Record<string, unknown>, _sender, sendResponse) => {
+  if (contextInvalidated) return false;
   if (message.type === "FILL_VALUE") {
     const purpose = message.purpose === "phone" ? "phone" : "otp";
     const value = String(message.value ?? "");
@@ -64,6 +68,7 @@ async function initialize(): Promise<void> {
   document.addEventListener("focusin", trackFocus, true);
   if (window.top === window) {
     await domReady();
+    if (!checkRuntimeContext()) return;
     panel = new BridgePanel(response.position, response.soundEnabled !== false);
     if (response.state) panel.update(response.state);
   }
@@ -79,12 +84,25 @@ function trackFocus(event: FocusEvent): void {
 }
 
 function sendRuntimeMessageQuietly(message: Record<string, unknown>): void {
+  if (!checkRuntimeContext()) return;
   try {
-    void chrome.runtime.sendMessage(message).catch(() => undefined);
-  } catch {
-    // Reloading/updating an unpacked extension invalidates scripts that are
-    // still attached to existing tabs. Those tabs recover after a page reload.
+    void chrome.runtime.sendMessage(message).catch((error: unknown) => { checkRuntimeContext(error); });
+  } catch (error) {
+    checkRuntimeContext(error);
   }
+}
+
+function checkRuntimeContext(error?: unknown): boolean {
+  if (contextInvalidated) return false;
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (globalThis.chrome?.runtime?.id && !/extension context invalidated/i.test(message)) return true;
+  contextInvalidated = true;
+  enabled = false;
+  lastTarget = null;
+  document.removeEventListener("focusin", trackFocus, true);
+  panel?.invalidateContext();
+  for (const handler of [...contextInvalidationHandlers]) handler();
+  return false;
 }
 
 class BridgePanel {
@@ -169,6 +187,7 @@ class BridgePanel {
     this.applyCollapsed();
     document.documentElement.append(this.host);
     this.refreshTimer = window.setInterval(() => {
+      if (!checkRuntimeContext()) return;
       if (!this.destroyed && !this.host.isConnected) document.documentElement.append(this.host);
       this.renderMain();
     }, 1_000);
@@ -178,6 +197,17 @@ class BridgePanel {
     this.destroyed = true;
     window.clearInterval(this.refreshTimer);
     this.host.remove();
+  }
+
+  invalidateContext(): void {
+    window.clearInterval(this.refreshTimer);
+    this.statusDot.dataset.state = "offline";
+    this.statusText.textContent = "页面待刷新";
+    this.currentState = { connection: "offline", waitState: "IDLE", maskedPhone: this.currentState.maskedPhone };
+    this.main.replaceChildren(element("p", "hint", PAGE_REFRESH_MESSAGE));
+    if (this.settingsOpen) this.settingsArea.replaceChildren();
+    this.shadow.querySelectorAll<HTMLButtonElement | HTMLInputElement>("button, input").forEach((control) => { control.disabled = true; });
+    this.showFeedback(PAGE_REFRESH_MESSAGE, true);
   }
 
   avoidTarget(target: EditableTarget): void {
@@ -196,6 +226,7 @@ class BridgePanel {
   }
 
   update(next: PanelState): void {
+    if (contextInvalidated) return;
     this.previousWaitState = this.currentState.waitState;
     this.currentState = next;
     if (next.waitState === "CODE_READY" && this.previousWaitState !== "CODE_READY") this.codePageVisible = true;
@@ -209,6 +240,7 @@ class BridgePanel {
   }
 
   updateAddress(address?: { host?: string; port?: number }): void {
+    if (contextInvalidated) return;
     if (!this.settingsOpen || !this.settingsConfig || !address) return;
     const host = String(address.host ?? "");
     const port = Number(address.port);
@@ -219,7 +251,7 @@ class BridgePanel {
   }
 
   private renderMain(): void {
-    if (this.destroyed) return;
+    if (this.destroyed || contextInvalidated) return;
     const state = this.currentState;
     this.main.replaceChildren();
     const hasRetainedCode = state.waitState === "CODE_READY" && Boolean(state.code || state.candidates?.length);
@@ -322,7 +354,7 @@ class BridgePanel {
   private async loadSettings(successMessage?: string): Promise<void> {
     const response = await this.action("GET_OPTIONS");
     if (!response) {
-      this.settingsArea.replaceChildren(element("p", "hint", "读取失败，请收起后重试"));
+      if (!contextInvalidated) this.settingsArea.replaceChildren(element("p", "hint", "读取失败，请收起后重试"));
       return;
     }
     this.syncSettingsConfig(response);
@@ -397,13 +429,12 @@ class BridgePanel {
         void this.runBusy(pairButton, "正在配对…", async () => {
           const phoneResponse = await this.action("INLINE_SAVE_PHONE", { phoneNumber: phoneInput.value });
           if (!phoneResponse) return;
-          const addressResponse = await this.action("INLINE_SAVE_ADDRESS", {
+          const preparation = await this.action("PREPARE_CONNECTION", {
             host: host.input.value,
             port: Number(port.input.value)
           });
-          if (!addressResponse) return;
-          this.syncSettingsConfig(addressResponse);
-          await this.requestLocalNetworkPermission(host.input.value.trim(), Number(port.input.value));
+          if (!preparation) return;
+          if (preparation.ready !== true) await this.requestLocalNetworkPermission(host.input.value.trim(), Number(port.input.value));
           const stored = await this.action("PAIR", {
             host: host.input.value,
             port: Number(port.input.value),
@@ -434,6 +465,11 @@ class BridgePanel {
         void this.runBusy(reconnectButton, changed ? "保存中…" : "连接中…", async () => {
           const phoneResponse = await this.action("INLINE_SAVE_PHONE", { phoneNumber: phoneInput.value });
           if (!phoneResponse) return;
+          const preparation = await this.action("PREPARE_CONNECTION", {
+            host: host.input.value, port: Number(port.input.value)
+          });
+          if (!preparation) return;
+          if (preparation.ready !== true) await this.requestLocalNetworkPermission(host.input.value.trim(), Number(port.input.value));
           if (changed) {
             const response = await this.action("INLINE_SAVE_ADDRESS", {
               host: host.input.value,
@@ -441,10 +477,9 @@ class BridgePanel {
             });
             if (!response) return;
             await this.loadSettings("新地址已保存，正在重新连接");
-          } else {
-            const response = await this.action("RECONNECT");
-            if (response) this.showFeedback("正在重新连接手机");
           }
+          const response = await this.action("RECONNECT");
+          if (response) this.showFeedback("正在重新连接手机");
         });
       });
       const unpairButton = element("button", "button secondary danger", "更换手机") as HTMLButtonElement;
@@ -469,16 +504,32 @@ class BridgePanel {
       pairingSection.append(reconnectButton, unpairButton);
     }
 
-    this.settingsArea.append(phoneSection, pairingSection);
+    const usbGuide = document.createElement("details");
+    usbGuide.className = "usb-guide";
+    const usbSummary = document.createElement("summary");
+    usbSummary.textContent = "无 Wi-Fi？用数据线，需 USB 调试";
+    const usbSteps = document.createElement("ol");
+    usbSteps.append(
+      element("li", "", "手机设置 → 系统 / 更多设置 → 开发者选项 → 开启 USB 调试。"),
+      element("li", "", "用数据线连接电脑，手机弹出提示时允许调试。"),
+      element("li", "", "在这里点“配对手机”或“重新连接”，再点“连接手机”，选择你的手机。")
+    );
+    usbGuide.append(usbSummary, usbSteps, element("p", "usb-guide-note", "找不到开发者选项？在“关于手机”中连点版本号 7 次；也可用 App 底部入口引导开启。"));
+    this.settingsArea.append(phoneSection, pairingSection, usbGuide);
   }
 
   private async requestLocalNetworkPermission(host: string, port: number): Promise<void> {
     const token = crypto.randomUUID();
     await new Promise<void>((resolve, reject) => {
       let timeout = 0;
+      let finished = false;
+      const onInvalidated = (): void => finish(new Error(PAGE_REFRESH_MESSAGE));
       const finish = (error?: Error): void => {
+        if (finished) return;
+        finished = true;
         window.clearTimeout(timeout);
-        chrome.runtime.onMessage.removeListener(onMessage);
+        contextInvalidationHandlers.delete(onInvalidated);
+        try { chrome.runtime.onMessage.removeListener(onMessage); } catch { /* The old runtime may already be gone. */ }
         if (error) reject(error); else resolve();
       };
       const onMessage = (message: Record<string, unknown>): false => {
@@ -488,7 +539,8 @@ class BridgePanel {
         return false;
       };
       chrome.runtime.onMessage.addListener(onMessage);
-      timeout = window.setTimeout(() => finish(new Error("授权窗口等待超时，请关闭窗口后重新点击配对")), 50_000);
+      contextInvalidationHandlers.add(onInvalidated);
+      timeout = window.setTimeout(() => finish(new Error("授权窗口等待超时，请关闭窗口后重新点击配对")), 185_000);
       void chrome.runtime.sendMessage({
         type: "AUTHORIZE_LOCAL_NETWORK_PROBE",
         token,
@@ -496,7 +548,10 @@ class BridgePanel {
         port
       }).then((authorization: Record<string, unknown> | undefined) => {
         if (!authorization?.ok) finish(new Error(String(authorization?.error ?? "无法打开浏览器授权窗口")));
-      }).catch(() => finish(new Error("无法打开浏览器授权窗口")));
+      }).catch((error: unknown) => {
+        checkRuntimeContext(error);
+        finish(new Error(contextInvalidated ? PAGE_REFRESH_MESSAGE : "无法打开浏览器授权窗口"));
+      });
     });
   }
 
@@ -507,9 +562,10 @@ class BridgePanel {
     try {
       await task();
     } catch (error) {
+      checkRuntimeContext(error);
       this.showFeedback(error instanceof Error ? error.message : "操作失败", true);
     } finally {
-      button.disabled = false;
+      button.disabled = contextInvalidated;
       button.textContent = originalLabel;
     }
   }
@@ -521,6 +577,7 @@ class BridgePanel {
   }
 
   private async action(type: string, extra: Record<string, unknown> = {}): Promise<Record<string, unknown> | null> {
+    if (!checkRuntimeContext()) return null;
     try {
       const response = await chrome.runtime.sendMessage({ type, ...extra }) as Record<string, unknown> | undefined;
       if (!response?.ok) {
@@ -530,14 +587,15 @@ class BridgePanel {
       this.showFeedback(typeof response.message === "string" ? response.message : "");
       return response;
     } catch (error) {
+      checkRuntimeContext(error);
       this.showFeedback(error instanceof Error ? error.message : "扩展后台未响应", true);
       return null;
     }
   }
 
   private showFeedback(message: string, error = false): void {
-    this.errorText.textContent = message;
-    this.errorText.dataset.kind = error ? "error" : "success";
+    this.errorText.textContent = contextInvalidated ? PAGE_REFRESH_MESSAGE : message;
+    this.errorText.dataset.kind = error || contextInvalidated ? "error" : "success";
   }
 
   private async copyCode(): Promise<void> {
@@ -714,4 +772,5 @@ const styles = `<style>
   .row{display:grid;grid-template-columns:1fr 1fr;gap:7px}.choices{display:flex;flex-wrap:wrap;gap:6px;justify-content:center}.choice{background:#e8efff;color:#1d4ed8;font-size:17px;font-variant-numeric:tabular-nums}
   .inline-settings{display:grid;gap:6px;margin-top:7px;padding-top:7px;border-top:1px solid #e7ebf0}.inline-settings.hidden{display:none}.settings-section{display:grid;gap:6px}.pairing-section{padding-top:7px;border-top:1px solid #e7ebf0}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.section-title{font-size:11px;font-weight:800;color:#202939}.pair-state{border-radius:999px;background:#f0f2f5;padding:2px 6px;color:#667085;font-size:9px;font-weight:700}.pair-state.paired{background:#e7f8ef;color:#067647}.field{display:grid;gap:3px}.field-label{color:#667085;font-size:9px}.field input,.compact-phone-row input{width:100%;height:30px;border:1px solid #d8dee8;border-radius:7px;outline:0;background:#fff;padding:0 8px;color:#1d2939;font:10px Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}.field input::placeholder,.compact-phone-row input::placeholder{color:#a2aab7}.field input:focus,.compact-phone-row input:focus{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.12)}.compact-phone-row{display:grid;grid-template-columns:minmax(0,1fr) 48px;gap:5px}.compact-save{min-height:30px;padding:5px}.address-row{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(65px,.75fr);gap:5px}.settings-help{margin:0;color:#667085;font-size:9px;line-height:1.45}
   .error{margin:6px 0 0;color:#c43c3c;font-size:9px}.error[data-kind="success"]{color:#067647}.error:empty{display:none}footer{display:flex;justify-content:space-between;margin-top:7px;padding-top:6px;border-top:1px solid #edf0f3}.link{border:0;background:transparent;padding:1px;color:#748093;font-family:inherit;font-size:9px;line-height:1.2;cursor:pointer}.link:hover{color:#2563eb;text-decoration:underline}
+  .usb-guide{margin-top:2px;padding-top:7px;border-top:1px solid #edf0f3;color:#667085;font-size:9px;line-height:1.6}.usb-guide summary{display:flex;align-items:center;justify-content:space-between;gap:4px;list-style:none;cursor:pointer;color:#667085}.usb-guide summary::-webkit-details-marker{display:none}.usb-guide summary::after{content:"";flex:none;width:5px;height:5px;margin-right:4px;border-right:1px solid #8b98aa;border-bottom:1px solid #8b98aa;transform:rotate(45deg) translateY(-2px)}.usb-guide[open] summary::after{transform:rotate(225deg) translate(-1px,-1px)}.usb-guide summary:hover,.usb-guide summary:focus-visible{color:#2563eb}.usb-guide summary:focus-visible{outline:1px solid #b8cdfa;outline-offset:3px;border-radius:3px}.usb-guide ol{margin:7px 0 0;padding-left:16px}.usb-guide li+li{margin-top:5px}.usb-guide-note{margin:7px 0 0;color:#8390a2;font-size:9px}
 </style>`;

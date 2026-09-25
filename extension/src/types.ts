@@ -14,6 +14,7 @@ export interface ExtensionConfig {
   clientId: string;
   deviceId?: string;
   pairingKey?: string;
+  usbDeviceKey?: string;
   allowedDomains: string[];
   excludedDomains: string[];
   soundEnabled: boolean;
