@@ -23,9 +23,10 @@ object OtpParser {
         val normalized = text.trim()
         if (normalized.isEmpty()) return OtpParseResult.NoContent
         val lower = normalized.lowercase()
-        val bankInquiryOrLogin = lower.contains("登录") || lower.contains("信息查询")
+        val bankAllowedPurpose = lower.contains("登录") || lower.contains("信息查询") ||
+            (lower.contains("招聘") && lower.contains("验证码"))
         if (transactionRiskKeywords.any(lower::contains) ||
-            (bankKeywords.any(lower::contains) && !bankInquiryOrLogin)
+            (bankKeywords.any(lower::contains) && !bankAllowedPurpose)
         ) return OtpParseResult.HighRisk
 
         val candidates = candidateRegex.findAll(normalized)

@@ -239,7 +239,7 @@ class BridgePanel {
     this.statusText.textContent = connectionLabel(next.connection, next.notificationAccess);
     this.phoneText.textContent = next.maskedPhone;
     const showRisk = next.highRiskBlocked && (next.waitState === "ARMED" || next.waitState === "ARMED_OFFLINE");
-    const riskText = showRisk ? "手机已拦截高风险短信：银行短信需含“登录”或“信息查询”；支付、转账等短信始终拦截。" : "";
+    const riskText = showRisk ? "手机已拦截高风险短信：银行短信需注明登录、信息查询或招聘验证码；支付、转账等短信始终拦截。" : "";
     if (this.riskNotice.textContent !== riskText) this.riskNotice.textContent = riskText;
     if (!this.settingsOpen || next.error) this.showFeedback(next.error ?? "", true);
     this.renderMain();

@@ -61,10 +61,17 @@ class OtpParserTest {
     }
 
     @Test
+    fun acceptsBankRecruitmentCodeWithoutExplicitLoginPurpose() {
+        val message = "浦发银行\n95528\n【浦发招聘】本次验证码为：123456有效期15分钟，如非本人操作，请忽略【浦发银行】"
+        assertEquals("123456", (OtpParser.parse(message) as OtpParseResult.Match).code)
+    }
+
+    @Test
     fun stillRejectsBankMessagesWithoutPurposeAndTransactions() {
         assertTrue(OtpParser.parse("【光大银行】验证码 246810，请勿泄露") is OtpParseResult.HighRisk)
         assertTrue(OtpParser.parse("【光大银行】招聘管理系统支付验证码 246810，用于系统登录") is OtpParseResult.HighRisk)
         assertTrue(OtpParser.parse("【其他银行】交易验证码 246810，用于信息查询") is OtpParseResult.HighRisk)
+        assertTrue(OtpParser.parse("【其他银行】招聘支付验证码 246810") is OtpParseResult.HighRisk)
     }
 
     @Test
