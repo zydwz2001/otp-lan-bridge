@@ -208,17 +208,22 @@ class MainActivity : Activity() {
         root.addView(startCard, matchWrap())
 
         plainButton("发送测试验证码（可选）") {
-            val ok = coordinator.sendSyntheticNotification()
+            val result = coordinator.sendTestOtp()
             val listenerConnected = coordinator.snapshot().notificationListenerConnected
             Toast.makeText(
                 this,
-                when {
-                    ok && !listenerConnected -> "测试码已发送；真实短信仍需先修复通知读取"
-                    ok -> "测试码已发送"
-                    else -> "请先在浏览器网页中开始等待验证码"
+                when (result) {
+                    TestOtpSendResult.SENT -> if (listenerConnected) {
+                        "测试码已发出，请查看浏览器"
+                    } else {
+                        "测试码已发出；真实短信仍需先修复通知读取"
+                    }
+                    TestOtpSendResult.NO_ACTIVE_WAIT -> "请先在浏览器网页中开始等待验证码"
+                    TestOtpSendResult.SEND_FAILED -> "测试码发送失败，请重新开始等待后重试"
                 },
                 Toast.LENGTH_LONG
             ).show()
+            renderState()
         }.withMargins(top = 4).also(root::addView)
 
         val guide = card().withMargins(top = 14)

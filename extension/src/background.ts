@@ -1015,7 +1015,9 @@ async function handleBusinessMessage(type: Envelope["type"], payload: Record<str
     } else if (payload.kind === "ARMED" && payload.requestId === state.requestId) {
       confirmedArmRequestId = String(payload.requestId);
       clearArmRetry();
-      await updateState({ waitState: "ARMED", error: undefined });
+      if (state.waitState === "ARMED" || state.waitState === "ARMED_OFFLINE") {
+        await updateState({ waitState: "ARMED", error: undefined });
+      }
     }
     return;
   }

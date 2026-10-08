@@ -44,6 +44,7 @@ class BridgeCoordinator(private val context: Context) {
             onOtpAcknowledged = {
                 lastCode = null
                 lastCodeAt = null
+                diagnostic = "浏览器已收到验证码"
             },
             onStateChanged = { diagnostic = it }
         ).also { server = it }
@@ -208,23 +209,19 @@ class BridgeCoordinator(private val context: Context) {
         }
     }
 
-    fun sendSyntheticNotification(): Boolean {
-        val smsPackage = selectedSmsPackage() ?: return false
-        val activeServer = server ?: return false
-        if (activeServer.captureSession() == null) return false
+    fun sendTestOtp(): TestOtpSendResult {
+        val activeServer = server ?: return TestOtpSendResult.NO_ACTIVE_WAIT
+        val arm = captureSession() ?: return TestOtpSendResult.NO_ACTIVE_WAIT
+        val now = System.currentTimeMillis()
         val code = (secureRandom.nextInt(900_000) + 100_000).toString()
-        handleNotification(
-            NotificationPayload(
-                packageName = smsPackage,
-                notificationKey = "local-test-${System.currentTimeMillis()}",
-                postedAt = System.currentTimeMillis(),
-                title = "本地端到端测试",
-                text = "验证码 $code，5 分钟内有效，请勿泄露。",
-                bigText = null,
-                textLines = emptyList()
-            )
-        )
-        return true
+        if (!activeServer.deliverOtp(arm, code, emptyList(), 0.99, now, "本地测试")) {
+            diagnostic = "测试验证码未能发送，请重新开始等待后重试"
+            return TestOtpSendResult.SEND_FAILED
+        }
+        lastCode = code
+        lastCodeAt = now
+        diagnostic = "测试验证码已发出，等待浏览器确认"
+        return TestOtpSendResult.SENT
     }
 
     fun selectedSmsPackage(): String? = config.selectedSmsPackage ?: Telephony.Sms.getDefaultSmsPackage(context)
@@ -307,6 +304,8 @@ class BridgeCoordinator(private val context: Context) {
         private const val OBSERVED_NOTIFICATION_TTL_MS = 10 * 60 * 1000L
     }
 }
+
+enum class TestOtpSendResult { SENT, NO_ACTIVE_WAIT, SEND_FAILED }
 
 internal const val NOTIFICATION_RACE_WINDOW_MS = 5_000L
 

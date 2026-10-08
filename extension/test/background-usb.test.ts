@@ -180,6 +180,37 @@ it("switches Wi-Fi to USB and falls back after unplugging while preserving the a
   await message({ type: "UNPAIR" });
 });
 
+it("shows an OTP delivered by the paired phone during an active wait", async () => {
+  await import("../src/background");
+  await vi.waitFor(() => expect(session.wifiRelayRuntimeV2.connection).toBe("online"));
+  expect(await message({ type: "UI_REARM" })).toMatchObject({ ok: true });
+  const active = sockets.find((socket) => socket.transport === "usb" && socket.authenticated)!;
+  await vi.waitFor(() => expect(active.requestId).toBe(session.wifiRelayRuntimeV2.requestId));
+
+  const messageId = crypto.randomUUID();
+  await active.encrypted("OTP", {
+    requestId: active.requestId,
+    messageId,
+    digits: 6,
+    receivedAt: Date.now(),
+    sourceAppLabel: "本地测试",
+    senderMasked: "",
+    confidence: 0.99,
+    ambiguous: false,
+    code: "246810"
+  });
+  await vi.waitFor(() => expect(session.wifiRelayRuntimeV2).toMatchObject({
+    waitState: "CODE_READY", code: "246810", messageId
+  }));
+  const writesBeforeLateAck = vi.mocked(chrome.storage.session.set).mock.calls.length;
+  await active.encrypted("ACK", { kind: "ARMED", requestId: active.requestId });
+  await active.encrypted("ACK", { kind: "STATUS", hostAddress: "", notificationAccess: true });
+  await vi.waitFor(() => expect(vi.mocked(chrome.storage.session.set).mock.calls.length)
+    .toBeGreaterThan(writesBeforeLateAck));
+  expect(session.wifiRelayRuntimeV2).toMatchObject({ waitState: "CODE_READY", code: "246810" });
+  await message({ type: "UNPAIR" });
+});
+
 it("does not allow content scripts to invoke the USB authorization endpoint", async () => {
   delete local.wifiRelayConfigV2.pairingKey;
   await import("../src/background");

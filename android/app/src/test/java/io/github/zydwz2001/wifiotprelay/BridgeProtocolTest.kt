@@ -58,7 +58,8 @@ class BridgeProtocolTest {
         val store = Store()
         val clientId = UUID.randomUUID().toString()
         store.savePairing(clientId, CryptoBox.randomBytes(32))
-        val protocol = protocol(store)
+        var acknowledgedMessageId: String? = null
+        val protocol = protocol(store) { acknowledgedMessageId = it }
         try {
             val first = Peer()
             val firstSession = authenticate(protocol, store, first)
@@ -82,6 +83,7 @@ class BridgeProtocolTest {
             assertFalse(protocol.markFingerprintIfNew("notification-1", arm))
             send(protocol, store, second, secondSession, 2, "ACK", JSONObject()
                 .put("kind", "OTP_RECEIVED").put("messageId", replayed.getString("messageId")))
+            assertEquals(replayed.getString("messageId"), acknowledgedMessageId)
 
             val third = Peer()
             authenticate(protocol, store, third)
@@ -130,10 +132,10 @@ class BridgeProtocolTest {
             System.currentTimeMillis(), payload, session.second).toString())
     }
 
-    private fun protocol(store: Store) = BridgeProtocol(
+    private fun protocol(store: Store, onOtpAcknowledged: (String) -> Unit = {}) = BridgeProtocol(
         hostAddressProvider = { "" }, config = store,
         pairCodeProvider = { PairCodeState("123456", System.currentTimeMillis() + 60_000) },
         pairingAllowed = { true }, notificationAccessProvider = { true },
-        onPairingComplete = {}, onArmActivated = {}, onOtpAcknowledged = {}, onStateChanged = {}
+        onPairingComplete = {}, onArmActivated = {}, onOtpAcknowledged = onOtpAcknowledged, onStateChanged = {}
     )
 }
