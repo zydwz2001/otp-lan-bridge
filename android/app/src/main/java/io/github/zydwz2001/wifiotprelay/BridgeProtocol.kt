@@ -160,12 +160,14 @@ class BridgeProtocol(
         true
     }
 
-    fun sendDiagnostic(code: String, message: String) {
-        val connection = synchronized(stateLock) { activeClient } ?: return
-        sendEncrypted(
+    fun sendDiagnostic(code: String, message: String, requestId: String? = null): Boolean {
+        val connection = synchronized(stateLock) { activeClient } ?: return false
+        val payload = JSONObject().put("code", code).put("message", message.take(100))
+        if (requestId != null) payload.put("requestId", requestId)
+        return sendEncrypted(
             connection,
             "ERROR",
-            JSONObject().put("code", code).put("message", message.take(100))
+            payload
         )
     }
 

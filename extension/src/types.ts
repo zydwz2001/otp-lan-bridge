@@ -37,6 +37,7 @@ export interface BridgeRuntimeState {
   sourceAppLabel?: string;
   confidence?: number;
   error?: string;
+  highRiskBlocked?: boolean;
 }
 
 export interface PanelState extends Omit<BridgeRuntimeState, "armedTabId"> {

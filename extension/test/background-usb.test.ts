@@ -211,6 +211,30 @@ it("shows an OTP delivered by the paired phone during an active wait", async () 
   await message({ type: "UNPAIR" });
 });
 
+it("shows only the active wait's high-risk block and clears it after an OTP arrives", async () => {
+  await import("../src/background");
+  await vi.waitFor(() => expect(session.wifiRelayRuntimeV2.connection).toBe("online"));
+  expect(await message({ type: "UI_REARM" })).toMatchObject({ ok: true });
+  const active = sockets.find((socket) => socket.transport === "usb" && socket.authenticated)!;
+  await vi.waitFor(() => expect(active.requestId).toBe(session.wifiRelayRuntimeV2.requestId));
+
+  await active.encrypted("ERROR", { code: "HIGH_RISK_NOTIFICATION", requestId: "previous-wait", message: "blocked" });
+  expect(session.wifiRelayRuntimeV2.highRiskBlocked).toBe(false);
+  await active.encrypted("ERROR", { code: "HIGH_RISK_NOTIFICATION", requestId: active.requestId, message: "blocked" });
+  await vi.waitFor(() => expect(session.wifiRelayRuntimeV2.highRiskBlocked).toBe(true));
+  await active.encrypted("ACK", { kind: "ARMED", requestId: active.requestId });
+  expect(session.wifiRelayRuntimeV2.highRiskBlocked).toBe(true);
+
+  await active.encrypted("OTP", {
+    requestId: active.requestId, messageId: crypto.randomUUID(), receivedAt: Date.now(),
+    sourceAppLabel: "短信", confidence: 0.99, code: "246810"
+  });
+  await vi.waitFor(() => expect(session.wifiRelayRuntimeV2).toMatchObject({
+    waitState: "CODE_READY", highRiskBlocked: false
+  }));
+  await message({ type: "UNPAIR" });
+});
+
 it("does not allow content scripts to invoke the USB authorization endpoint", async () => {
   delete local.wifiRelayConfigV2.pairingKey;
   await import("../src/background");

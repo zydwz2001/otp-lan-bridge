@@ -155,6 +155,20 @@ it("opens phone and pairing settings inside the floating panel", async () => {
   await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({ type: "RECONNECT" }));
 
   (shadow!.querySelector(".settings") as HTMLButtonElement).click();
+  for (const listener of [...runtimeListeners]) {
+    listener({
+      type: "UI_STATE",
+      state: {
+        connection: "online",
+        waitState: "ARMED",
+        maskedPhone: "138****8000",
+        waitExpiresAt: Date.now() + 5 * 60 * 1000,
+        highRiskBlocked: true
+      }
+    });
+  }
+  expect(shadow!.querySelector(".risk-notice")?.textContent).toContain("手机已拦截高风险短信");
+  expect(shadow!.querySelector(".risk-notice")?.getAttribute("role")).toBe("alert");
   const codeExpiresAt = Date.now() + 5 * 60 * 1000;
   for (const listener of [...runtimeListeners]) {
     listener({
@@ -171,6 +185,7 @@ it("opens phone and pairing settings inside the floating panel", async () => {
     });
   }
   await vi.waitFor(() => expect(shadow!.querySelector(".code")?.textContent).toBe("483921"));
+  expect(shadow!.querySelector(".risk-notice")?.textContent).toBe("");
   const backToFill = [...shadow!.querySelectorAll("button")].find((button) => button.textContent === "返回填充")!;
   backToFill.click();
   expect(shadow!.querySelector(".code")).toBeNull();

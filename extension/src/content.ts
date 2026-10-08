@@ -111,6 +111,7 @@ class BridgePanel {
   private readonly statusDot: HTMLElement;
   private readonly statusText: HTMLElement;
   private readonly phoneText: HTMLElement;
+  private readonly riskNotice: HTMLElement;
   private readonly main: HTMLElement;
   private readonly settingsArea: HTMLElement;
   private readonly errorText: HTMLElement;
@@ -149,6 +150,7 @@ class BridgePanel {
         </header>
         <div class="body">
           <div class="meta"><span class="status">未配对</span><span class="phone">未配置</span></div>
+          <p class="risk-notice" role="alert"></p>
           <main></main>
           <div class="inline-settings hidden"></div>
           <p class="error" aria-live="polite"></p>
@@ -158,6 +160,7 @@ class BridgePanel {
     this.statusDot = required(".dot", this.shadow);
     this.statusText = required(".status", this.shadow);
     this.phoneText = required(".phone", this.shadow);
+    this.riskNotice = required(".risk-notice", this.shadow);
     this.main = required("main", this.shadow);
     this.settingsArea = required(".inline-settings", this.shadow);
     this.errorText = required(".error", this.shadow);
@@ -203,6 +206,7 @@ class BridgePanel {
     window.clearInterval(this.refreshTimer);
     this.statusDot.dataset.state = "offline";
     this.statusText.textContent = "页面待刷新";
+    this.riskNotice.textContent = "";
     this.currentState = { connection: "offline", waitState: "IDLE", maskedPhone: this.currentState.maskedPhone };
     this.main.replaceChildren(element("p", "hint", PAGE_REFRESH_MESSAGE));
     if (this.settingsOpen) this.settingsArea.replaceChildren();
@@ -234,6 +238,9 @@ class BridgePanel {
     this.statusDot.dataset.state = next.connection;
     this.statusText.textContent = connectionLabel(next.connection, next.notificationAccess);
     this.phoneText.textContent = next.maskedPhone;
+    const showRisk = next.highRiskBlocked && (next.waitState === "ARMED" || next.waitState === "ARMED_OFFLINE");
+    const riskText = showRisk ? "手机已拦截高风险短信：银行短信需含“登录”或“信息查询”；支付、转账等短信始终拦截。" : "";
+    if (this.riskNotice.textContent !== riskText) this.riskNotice.textContent = riskText;
     if (!this.settingsOpen || next.error) this.showFeedback(next.error ?? "", true);
     this.renderMain();
     if (next.waitState === "CODE_READY" && this.previousWaitState !== "CODE_READY" && this.soundEnabled) playTone();
@@ -768,6 +775,7 @@ const styles = `<style>
   .title{flex:1;font-size:11px;color:#1a2331}.icon{width:25px;height:25px;border:0;border-radius:7px;background:transparent;color:#667085;font-size:16px;cursor:pointer}.icon:hover{background:#e7ebf0;color:#1a2331}
   .body{max-height:calc(100vh - 48px);overflow-y:auto;padding:9px}.body.hidden{display:none}.meta{display:flex;justify-content:space-between;gap:6px;color:#7a8596;font-size:9px;margin-bottom:7px}
   main{display:grid;gap:7px}.hint,.eyebrow,.expires{margin:0;color:#7a8596;font-size:9px}.hint,.eyebrow{text-align:center}.countdown,.code{text-align:center;font-variant-numeric:tabular-nums}.countdown{font-size:24px;font-weight:750;color:#1f2937}.code{font-size:29px;font-weight:850;letter-spacing:.1em;color:#2563eb}.expires{text-align:center}
+  .risk-notice{margin:0 0 7px;padding:7px 8px;border:1px solid #f7c9c3;border-radius:8px;background:#fff3f1;color:#9f2419;font-size:10px;line-height:1.5}.risk-notice:empty{display:none}
   .button,.choice{appearance:none;border:0;border-radius:8px;min-height:32px;padding:6px 9px;font-family:inherit;font-size:10px;font-weight:700;line-height:1.25;white-space:nowrap;cursor:pointer}.button[hidden]{display:none!important}.button:disabled,.choice:disabled{cursor:not-allowed}.primary{background:#2563eb;color:#fff}.primary:hover{background:#1d4ed8}.primary:disabled{background:#e4e7ec;color:#667085}.secondary{background:#edf1f6;color:#435066}.secondary:hover{background:#e2e7ed}.danger{color:#b42318}
   .row{display:grid;grid-template-columns:1fr 1fr;gap:7px}.choices{display:flex;flex-wrap:wrap;gap:6px;justify-content:center}.choice{background:#e8efff;color:#1d4ed8;font-size:17px;font-variant-numeric:tabular-nums}
   .inline-settings{display:grid;gap:6px;margin-top:7px;padding-top:7px;border-top:1px solid #e7ebf0}.inline-settings.hidden{display:none}.settings-section{display:grid;gap:6px}.pairing-section{padding-top:7px;border-top:1px solid #e7ebf0}.section-heading{display:flex;align-items:center;justify-content:space-between;gap:8px}.section-title{font-size:11px;font-weight:800;color:#202939}.pair-state{border-radius:999px;background:#f0f2f5;padding:2px 6px;color:#667085;font-size:9px;font-weight:700}.pair-state.paired{background:#e7f8ef;color:#067647}.field{display:grid;gap:3px}.field-label{color:#667085;font-size:9px}.field input,.compact-phone-row input{width:100%;height:30px;border:1px solid #d8dee8;border-radius:7px;outline:0;background:#fff;padding:0 8px;color:#1d2939;font:10px Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif}.field input::placeholder,.compact-phone-row input::placeholder{color:#a2aab7}.field input:focus,.compact-phone-row input:focus{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.12)}.compact-phone-row{display:grid;grid-template-columns:minmax(0,1fr) 48px;gap:5px}.compact-save{min-height:30px;padding:5px}.address-row{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(65px,.75fr);gap:5px}.settings-help{margin:0;color:#667085;font-size:9px;line-height:1.45}

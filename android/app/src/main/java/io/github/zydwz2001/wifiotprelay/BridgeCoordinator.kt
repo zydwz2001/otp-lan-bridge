@@ -28,6 +28,7 @@ class BridgeCoordinator(private val context: Context) {
     @Volatile private var lastObservedNotificationAt: Long? = null
     @Volatile private var lastCode: String? = null
     @Volatile private var lastCodeAt: Long? = null
+    @Volatile private var reportedHighRiskArmId: String? = null
     private val secureRandom = SecureRandom()
 
     @Synchronized
@@ -166,7 +167,13 @@ class BridgeCoordinator(private val context: Context) {
                 diagnostic = "短信通知隐藏了内容"
                 if (changed) activeServer.sendDiagnostic("NOTIFICATION_CONTENT_HIDDEN", "短信通知隐藏了内容，请开启通知内容显示")
             }
-            OtpParseResult.HighRisk -> diagnostic = "已拦截高风险通知"
+            OtpParseResult.HighRisk -> {
+                diagnostic = "已拦截高风险通知"
+                if (reportedHighRiskArmId != arm.requestId && activeServer.sendDiagnostic(
+                        "HIGH_RISK_NOTIFICATION", "手机已拦截高风险短信", arm.requestId
+                    )
+                ) reportedHighRiskArmId = arm.requestId
+            }
             OtpParseResult.NoConfidentCandidate -> {
                 diagnostic = if (Regex("(?<!\\d)\\d{4,8}(?!\\d)").containsMatchIn(payload.combinedText())) {
                     "通知中读取到数字，但未满足验证码规则"

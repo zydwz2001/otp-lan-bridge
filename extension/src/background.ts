@@ -1022,6 +1022,13 @@ async function handleBusinessMessage(type: Envelope["type"], payload: Record<str
     return;
   }
   if (type === "ERROR") {
+    if (payload.code === "HIGH_RISK_NOTIFICATION") {
+      if (payload.requestId === state.requestId &&
+          (state.waitState === "ARMED" || state.waitState === "ARMED_OFFLINE")) {
+        await updateState({ highRiskBlocked: true });
+      }
+      return;
+    }
     const message = String(payload.message ?? "手机返回错误");
     await updateState({ error: message });
     return;
@@ -1055,6 +1062,7 @@ async function handleBusinessMessage(type: Envelope["type"], payload: Record<str
     receivedAt,
     sourceAppLabel: String(payload.sourceAppLabel ?? "短信").slice(0, 40),
     confidence: Number(payload.confidence),
+    highRiskBlocked: false,
     error: code ? undefined : "识别到多个数字，请确认验证码"
   });
   confirmedArmRequestId = state.requestId ?? "";
@@ -1102,6 +1110,7 @@ async function beginWait(tabId: number, url: string): Promise<void> {
     receivedAt: undefined,
     sourceAppLabel: undefined,
     confidence: undefined,
+    highRiskBlocked: false,
     error: state.connection === "online" ? undefined : "手机当前离线，连接恢复后继续等待"
   });
   confirmedArmRequestId = "";
@@ -1216,6 +1225,7 @@ async function clearWait(nextState: "IDLE" | "EXPIRED", error?: string): Promise
     receivedAt: undefined,
     sourceAppLabel: undefined,
     confidence: undefined,
+    highRiskBlocked: false,
     error
   });
 }

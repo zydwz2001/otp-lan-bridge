@@ -51,18 +51,20 @@ class OtpParserTest {
     }
 
     @Test
-    fun acceptsRecruitmentSystemCodesFromBankSender() {
+    fun acceptsBankLoginAndInquiryCodes() {
         val login = "光大银行\n95595\n【光大银行】验证码：246810，序号02，用途：您正在光大银行招聘管理系统，进行系统登录，切勿泄露。"
-        val inquiry = "【光大银行】验证码：384921，序号07，用途：您正在光大银行招聘管理系统，进行信息查询，切勿泄露。"
+        val inquiry = "【其他银行】验证码：384921，序号07，用途：账户信息查询，切勿泄露。"
+        val genericLogin = "【其他银行】登录验证码 739215，请勿泄露。"
         assertEquals("246810", (OtpParser.parse(login) as OtpParseResult.Match).code)
         assertEquals("384921", (OtpParser.parse(inquiry) as OtpParseResult.Match).code)
+        assertEquals("739215", (OtpParser.parse(genericLogin) as OtpParseResult.Match).code)
     }
 
     @Test
-    fun stillRejectsBankMessagesOutsideRecruitmentAndTransactions() {
-        assertTrue(OtpParser.parse("【光大银行】登录验证码 246810") is OtpParseResult.HighRisk)
+    fun stillRejectsBankMessagesWithoutPurposeAndTransactions() {
+        assertTrue(OtpParser.parse("【光大银行】验证码 246810，请勿泄露") is OtpParseResult.HighRisk)
         assertTrue(OtpParser.parse("【光大银行】招聘管理系统支付验证码 246810，用于系统登录") is OtpParseResult.HighRisk)
-        assertTrue(OtpParser.parse("【其他银行】验证码 246810，用于其他银行招聘管理系统登录") is OtpParseResult.HighRisk)
+        assertTrue(OtpParser.parse("【其他银行】交易验证码 246810，用于信息查询") is OtpParseResult.HighRisk)
     }
 
     @Test
