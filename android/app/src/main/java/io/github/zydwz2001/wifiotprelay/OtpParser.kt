@@ -11,8 +11,9 @@ object OtpParser {
     private val supportingKeywords = listOf(
         "有效", "分钟", "请勿泄露", "不要泄露", "expires", "valid", "do not share", "never share"
     )
-    private val riskKeywords = listOf(
-        "银行", "支付", "付款", "钱包", "转账", "交易", "bank", "payment", "wallet", "transfer", "transaction"
+    private val bankKeywords = listOf("银行", "bank")
+    private val transactionRiskKeywords = listOf(
+        "支付", "付款", "钱包", "转账", "交易", "payment", "wallet", "transfer", "transaction"
     )
     private val negativeNearby = listOf(
         "订单", "单号", "金额", "人民币", "元", "order", "amount", "cny", "usd", "日期", "时间"
@@ -22,7 +23,11 @@ object OtpParser {
         val normalized = text.trim()
         if (normalized.isEmpty()) return OtpParseResult.NoContent
         val lower = normalized.lowercase()
-        if (riskKeywords.any(lower::contains)) return OtpParseResult.HighRisk
+        val recruitmentPurpose = lower.contains("光大银行招聘管理系统") &&
+            (lower.contains("系统登录") || lower.contains("信息查询"))
+        if (transactionRiskKeywords.any(lower::contains) ||
+            (bankKeywords.any(lower::contains) && !recruitmentPurpose)
+        ) return OtpParseResult.HighRisk
 
         val candidates = candidateRegex.findAll(normalized)
             .filter { expectedDigits.isEmpty() || it.value.length in expectedDigits }
